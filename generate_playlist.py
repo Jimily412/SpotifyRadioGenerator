@@ -466,19 +466,24 @@ def fetch_audio_features(
     sp: spotipy.Spotify, track_ids: List[str]
 ) -> Dict[str, dict]:
     """
-    Fetch audio features in 100-track batches, using a local disk cache
-    (.audio_features_cache.json) to avoid redundant API calls on repeat runs.
+    Fetch audio features in 100-track batches with disk caching.
+    Returns an empty dict (without raising) if the endpoint returns 403,
+    signalling the caller to switch to the genre-based fallback path.
     """
     cache = _load_features_cache()
     uncached = [tid for tid in track_ids if tid not in cache]
 
-    if uncached:
-        batch_size = 100
-        n_batches = math.ceil(len(uncached) / batch_size)
-        LOG.info(
-            f"Fetching audio features: {len(uncached)} new tracks "
-            f"({len(track_ids) - len(uncached)} served from cache, {n_batches} API batches)..."
-        )
+    if not uncached:
+        LOG.info(f"Audio features: all {len(track_ids)} tracks served from cache")
+        return {tid: cache[tid] for tid in track_ids if tid in cache}
+
+    batch_size = 100
+    n_batches = math.ceil(len(uncached) / batch_size)
+    LOG.info(
+        f"Fetching audio features: {len(uncached)} new tracks "
+        f"({len(track_ids) - len(uncached)} cached, {n_batches} batches)..."
+    )
+    try:
         for i in range(n_batches):
             batch = uncached[i * batch_size : (i + 1) * batch_size]
             LOG.debug(f"  Batch {i + 1}/{n_batches}")
@@ -488,10 +493,223 @@ def fetch_audio_features(
                     cache[feat["id"]] = feat
             time.sleep(0.15)
         _save_features_cache(cache)
-    else:
-        LOG.info(f"Audio features: all {len(track_ids)} tracks loaded from cache — no API calls needed")
+    except spotipy.exceptions.SpotifyException as exc:
+        if exc.http_status == 403:
+            LOG.warning(
+                "audio-features returned 403 — endpoint requires Extended Quota Mode. "
+                "Switching to genre-based clustering (no extra permissions needed)."
+            )
+            return {}   # empty dict signals the caller to use the fallback
+        raise
 
     return {tid: cache[tid] for tid in track_ids if tid in cache}
+
+
+# ── Genre-based fallback (used when audio-features / recommendations are blocked) ─
+
+def fetch_track_details(sp: spotipy.Spotify, track_ids: List[str]) -> Dict[str, dict]:
+    """Batch-fetch full track objects (unrestricted endpoint). Gives us artist IDs."""
+    result: Dict[str, dict] = {}
+    batch_size = 50
+    n = math.ceil(len(track_ids) / batch_size)
+    LOG.info(f"Fetching track details for {len(track_ids)} tracks ({n} batches)...")
+    for i in range(n):
+        batch = track_ids[i * batch_size : (i + 1) * batch_size]
+        data = spotify_retry(sp.tracks, batch) or {}
+        for t in data.get("tracks", []) or []:
+            if t:
+                result[t["id"]] = t
+        time.sleep(0.1)
+    return result
+
+
+def fetch_artist_genres(
+    sp: spotipy.Spotify, artist_ids: List[str]
+) -> Dict[str, dict]:
+    """Batch-fetch artist objects (unrestricted). Each artist has a 'genres' list."""
+    result: Dict[str, dict] = {}
+    batch_size = 50
+    n = math.ceil(len(artist_ids) / batch_size)
+    LOG.info(f"Fetching artist info for {len(artist_ids)} artists ({n} batches)...")
+    for i in range(n):
+        batch = artist_ids[i * batch_size : (i + 1) * batch_size]
+        data = spotify_retry(sp.artists, batch) or {}
+        for a in data.get("artists", []) or []:
+            if a:
+                result[a["id"]] = {
+                    "name": a.get("name", ""),
+                    "genres": a.get("genres", []),
+                    "popularity": a.get("popularity", 50),
+                }
+        time.sleep(0.1)
+    LOG.info(f"Got artist info for {len(result)}/{len(artist_ids)} artists")
+    return result
+
+
+def build_genre_matrix(
+    tracks: List[dict],
+    artist_genres: Dict[str, dict],
+    top_n_genres: int = 70,
+) -> Tuple[np.ndarray, List[dict]]:
+    """
+    Build a genre-based feature matrix for K-Means clustering.
+    Expects each track to already have 'artist_id' set.
+    The matrix has one column per top-N genre (binary) plus one for artist popularity.
+    """
+    genre_freq: Dict[str, float] = defaultdict(float)
+    for t in tracks:
+        aid = t.get("artist_id", "")
+        if aid:
+            for g in artist_genres.get(aid, {}).get("genres", []):
+                genre_freq[g] += t.get("weight", 1.0)
+
+    vocab = sorted(genre_freq, key=genre_freq.get, reverse=True)[:top_n_genres]  # type: ignore[arg-type]
+    vocab_idx = {g: i for i, g in enumerate(vocab)}
+
+    valid_tracks: List[dict] = []
+    rows: List[List[float]] = []
+    for t in tracks:
+        aid = t.get("artist_id", "")
+        if not aid:
+            continue
+        a_info = artist_genres.get(aid, {})
+        pop = a_info.get("popularity", 50) / 100.0
+        vec = [0.0] * (len(vocab) + 1)
+        for g in a_info.get("genres", []):
+            if g in vocab_idx:
+                vec[vocab_idx[g]] = 1.0
+        vec[-1] = pop
+        rows.append(vec)
+        valid_tracks.append(t)
+
+    if not rows:
+        return np.zeros((0, len(vocab) + 1)), valid_tracks
+    return np.array(rows, dtype=float), valid_tracks
+
+
+def harvest_via_related_artists(
+    sp: spotipy.Spotify,
+    profile: dict,
+    quota: int,
+    exclude_ids: Set[str],
+) -> List[dict]:
+    """
+    Discovery via related-artists → top-tracks (unrestricted endpoints).
+    For each cluster: take top seed artists → fetch their related artists →
+    fetch top tracks of each related artist → filter known tracks.
+    """
+    seed_artist_ids = list({
+        t.get("artist_id", "") for t in profile["top_tracks"] if t.get("artist_id")
+    })[:6]
+
+    if not seed_artist_ids:
+        LOG.warning(f"Cluster {profile['id']}: no seed artist IDs, skipping")
+        return []
+
+    candidates: List[dict] = []
+    seen: Set[str] = set()
+    want = quota * 4  # gather 4× quota, best will be selected later
+
+    for seed_id in seed_artist_ids:
+        if len(candidates) >= want:
+            break
+        try:
+            related = spotify_retry(sp.artist_related_artists, seed_id)
+            related_artists = related.get("artists", [])[:8]
+        except Exception as exc:
+            LOG.debug(f"  related-artists failed for {seed_id}: {exc}")
+            continue
+
+        for rel in related_artists:
+            if len(candidates) >= want:
+                break
+            rel_id = rel["id"]
+            try:
+                top = spotify_retry(sp.artist_top_tracks, rel_id, country="US")
+                top_tracks = top.get("tracks", [])
+            except Exception as exc:
+                LOG.debug(f"  top-tracks failed for {rel_id}: {exc}")
+                continue
+
+            for t in top_tracks[:6]:
+                tid = t["id"]
+                if tid in seen or tid in exclude_ids:
+                    continue
+                candidates.append({
+                    "spotify_id": tid,
+                    "name": t["name"],
+                    "artist": t["artists"][0]["name"] if t.get("artists") else "Unknown",
+                    "uri": t["uri"],
+                    "cluster_id": profile["id"],
+                    "rel_genres": rel.get("genres", []),
+                    "rel_popularity": rel.get("popularity", 50),
+                })
+                seen.add(tid)
+
+            time.sleep(0.05)
+        time.sleep(0.1)
+
+    LOG.debug(
+        f"  Cluster {profile['id']} [{profile['description']}]: "
+        f"{len(candidates)} candidates via related artists (quota={quota})"
+    )
+    return candidates
+
+
+def score_and_select_by_genre(
+    candidates: List[dict],
+    profiles: List[dict],
+    quotas: List[int],
+    total_size: int,
+) -> List[dict]:
+    """
+    Select final tracks using genre overlap scoring (no audio features needed).
+    Each candidate's related-artist genres are compared against the cluster's
+    top genres. Popularity is used as a secondary signal.
+    """
+    # Build top-genre sets for each cluster from its member tracks
+    profile_top_genres: Dict[int, Set[str]] = {}
+    for p in profiles:
+        freq: Dict[str, float] = defaultdict(float)
+        for t in p.get("top_tracks", []):
+            for g in t.get("_genres", []):  # attached during run_pipeline
+                freq[g] += t.get("weight", 1.0)
+        profile_top_genres[p["id"]] = set(sorted(freq, key=freq.get, reverse=True)[:15])  # type: ignore[arg-type]
+
+    # Deduplicate
+    seen: Set[str] = set()
+    unique: List[dict] = []
+    for c in candidates:
+        if c["spotify_id"] not in seen:
+            unique.append(c)
+            seen.add(c["spotify_id"])
+
+    # Score
+    by_cluster: Dict[int, List[dict]] = defaultdict(list)
+    for c in unique:
+        cid = c["cluster_id"]
+        top_genres = profile_top_genres.get(cid, set())
+        cand_genres = set(c.get("rel_genres", []))
+        overlap = len(cand_genres & top_genres) / max(len(top_genres), 1)
+        pop = c.get("rel_popularity", 50) / 100.0
+        c = c.copy()
+        c["fit_score"] = overlap * 0.80 + pop * 0.20
+        by_cluster[cid].append(c)
+
+    # Select quota per cluster, shuffle to interleave moods
+    final: List[dict] = []
+    for profile, quota in zip(profiles, quotas):
+        pool = sorted(by_cluster.get(profile["id"], []),
+                      key=lambda x: x.get("fit_score", 0.0), reverse=True)
+        selected = pool[:quota]
+        final.extend(selected)
+        LOG.info(
+            f"  Cluster {profile['id']} [{profile['description']}]: "
+            f"selected {len(selected)}/{quota}"
+        )
+
+    random.shuffle(final)
+    return final[:total_size]
 
 
 def _normalize_tempo(bpm: float) -> float:
@@ -538,6 +756,9 @@ def build_feature_matrix(
 
 def _describe_cluster(centroid_norm: np.ndarray) -> str:
     """Human-readable mood label derived from a normalized centroid vector."""
+    if len(centroid_norm) != 7:
+        # Genre-mode centroids are not 7-dimensional; description is set later.
+        return "Mixed"
     d, e, v, t, a, ins, sp_val = centroid_norm
     parts: List[str] = []
 
@@ -987,19 +1208,62 @@ def run_pipeline(
         sp, user_id = create_spotify_client(config)
         check_stop()
 
-        # ── Step 3: resolve IDs, fetch features, cluster ─────────────
-        put(("step", 3, 6, "Resolving track IDs and clustering audio fingerprints…"))
+        # ── Step 3: resolve IDs, try audio features, cluster ─────────
+        put(("step", 3, 6, "Resolving track IDs and clustering…"))
         resolved = resolve_tracks_to_ids(sp, tracks)
         feat_map = fetch_audio_features(sp, [t["spotify_id"] for t in resolved])
-        matrix, valid_tracks = build_feature_matrix(resolved, feat_map)
-        LOG.info(f"Tracks with audio features: {len(valid_tracks)}")
 
-        if len(valid_tracks) < n_clusters * 2:
-            put(("error", "Too few tracks with audio features for clustering."))
-            return
+        if feat_map:
+            # ── Audio-features path ───────────────────────────────────
+            LOG.info("Using audio-features clustering (Extended Quota Mode available)")
+            matrix, valid_tracks = build_feature_matrix(resolved, feat_map)
+            LOG.info(f"Tracks with audio features: {len(valid_tracks)}")
+            if len(valid_tracks) < n_clusters * 2:
+                put(("error", "Too few tracks with audio features for clustering."))
+                return
+            labels, _ = cluster_tracks(valid_tracks, matrix, n_clusters)
+            profiles = build_cluster_profiles(valid_tracks, matrix, labels, len(set(labels)))
+        else:
+            # ── Genre-based fallback path (no Extended Quota Mode needed) ──
+            LOG.info("Audio-features blocked (403) — falling back to genre-based clustering")
+            put(("step", 3, 6, "Clustering by genre (audio-features endpoint unavailable)…"))
 
-        labels, _ = cluster_tracks(valid_tracks, matrix, n_clusters)
-        profiles = build_cluster_profiles(valid_tracks, matrix, labels, len(set(labels)))
+            # Fetch full track objects to extract primary artist IDs
+            track_ids = [t["spotify_id"] for t in resolved]
+            track_details = fetch_track_details(sp, track_ids)
+            for t in resolved:
+                td = track_details.get(t["spotify_id"], {})
+                artists_field = td.get("artists") or []
+                t["artist_id"] = artists_field[0]["id"] if artists_field else ""
+
+            artist_ids = list({t["artist_id"] for t in resolved if t.get("artist_id")})
+            artist_genres = fetch_artist_genres(sp, artist_ids)
+
+            matrix, valid_tracks = build_genre_matrix(resolved, artist_genres)
+            LOG.info(f"Tracks with genre data: {len(valid_tracks)}")
+            if len(valid_tracks) < n_clusters * 2:
+                put(("error", "Too few tracks with genre data for clustering."))
+                return
+
+            labels, _ = cluster_tracks(valid_tracks, matrix, n_clusters)
+            profiles = build_cluster_profiles(valid_tracks, matrix, labels, len(set(labels)))
+
+            # Replace generic "Mixed" descriptions with top genres per cluster
+            for p in profiles:
+                freq: Dict[str, float] = defaultdict(float)
+                for t in p["top_tracks"]:
+                    for g in artist_genres.get(t.get("artist_id", ""), {}).get("genres", []):
+                        freq[g] += t.get("weight", 1.0)
+                top_genres = sorted(freq, key=freq.get, reverse=True)[:3]  # type: ignore[arg-type]
+                p["description"] = (
+                    " / ".join(g.title() for g in top_genres)
+                    if top_genres else f"Cluster {p['id']}"
+                )
+
+            # Attach genre lists to each top-track so score_and_select_by_genre can use them
+            for p in profiles:
+                for t in p["top_tracks"]:
+                    t["_genres"] = artist_genres.get(t.get("artist_id", ""), {}).get("genres", [])
 
         liked_ids: Set[str] = {
             t["spotify_id"] for t in valid_tracks if t.get("is_liked") and t.get("spotify_id")
@@ -1011,8 +1275,8 @@ def run_pipeline(
         LOG.info(f"Excluding {len(exclude_ids)} already-known tracks from recommendations")
         check_stop()
 
-        # ── Step 4: harvest recommendations ─────────────────────────
-        put(("step", 4, 6, "Harvesting recommendations from each cluster…"))
+        # ── Step 4: harvest candidates ───────────────────────────────
+        put(("step", 4, 6, "Harvesting discovery candidates from each cluster…"))
         quotas = compute_quotas(profiles, target_size)
         LOG.info(f"Cluster quotas: {quotas} (total={sum(quotas)})")
 
@@ -1020,21 +1284,26 @@ def run_pipeline(
         for profile, quota in zip(profiles, quotas):
             check_stop()
             LOG.info(f"  → Cluster {profile['id']} [{profile['description']}] quota={quota}")
-            all_candidates.extend(harvest_recommendations(sp, profile, quota, exclude_ids))
+            if feat_map:
+                all_candidates.extend(harvest_recommendations(sp, profile, quota, exclude_ids))
+            else:
+                all_candidates.extend(harvest_via_related_artists(sp, profile, quota, exclude_ids))
 
         LOG.info(f"Total raw candidates: {len(all_candidates)}")
         if not all_candidates:
             put(("error",
-                 "No recommendation candidates found.\n"
-                 "The Spotify recommendations endpoint requires Extended Quota Mode — "
-                 "visit developer.spotify.com → your app → Request Extension."))
+                 "No discovery candidates found.\n"
+                 "Check your network connection and Spotify app settings."))
             return
 
         check_stop()
 
         # ── Step 5: score, deduplicate, select ───────────────────────
         put(("step", 5, 6, "Scoring and selecting final tracks…"))
-        final_tracks = score_and_select(sp, all_candidates, profiles, quotas, target_size)
+        if feat_map:
+            final_tracks = score_and_select(sp, all_candidates, profiles, quotas, target_size)
+        else:
+            final_tracks = score_and_select_by_genre(all_candidates, profiles, quotas, target_size)
         LOG.info(f"Final selection: {len(final_tracks)} tracks")
 
         profile_lookup = {p["id"]: p for p in profiles}
