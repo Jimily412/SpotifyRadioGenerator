@@ -20,6 +20,7 @@ import math
 import os
 import queue
 import random
+import requests
 import sys
 import threading
 import time
@@ -587,6 +588,218 @@ def build_genre_matrix(
     return np.array(rows, dtype=float), valid_tracks
 
 
+# ── Taste fingerprint ─────────────────────────────────────────────────────────
+
+def build_taste_fingerprint(
+    tracks: List[dict], artist_genres: Dict[str, dict]
+) -> dict:
+    """
+    Aggregate weighted genre and artist frequencies from the user's listening history.
+    Returns normalized dicts so scores are comparable across runs.
+    """
+    genre_freq: Dict[str, float] = defaultdict(float)
+    artist_freq: Dict[str, float] = defaultdict(float)
+    for t in tracks:
+        w = t.get("weight", 1.0)
+        aid = t.get("artist_id", "")
+        if aid:
+            artist_freq[aid] += w
+            for g in artist_genres.get(aid, {}).get("genres", []):
+                genre_freq[g] += w
+    total_g = sum(genre_freq.values()) or 1.0
+    total_a = sum(artist_freq.values()) or 1.0
+    return {
+        "genres":  {g: v / total_g for g, v in genre_freq.items()},
+        "artists": {a: v / total_a for a, v in artist_freq.items()},
+    }
+
+
+# ── Last.fm optional enrichment ───────────────────────────────────────────────
+# Add "lastfm_api_key": "<key>" to config.json for better discovery.
+# Free key at: https://www.last.fm/api/account/create
+
+_LASTFM_CACHE_FILE = ".lastfm_cache.json"
+
+
+def _load_lastfm_cache() -> dict:
+    if os.path.exists(_LASTFM_CACHE_FILE):
+        try:
+            with open(_LASTFM_CACHE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_lastfm_cache(cache: dict) -> None:
+    with open(_LASTFM_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
+
+
+def fetch_lastfm_similar_artists(
+    artist_names: List[str],
+    api_key: str,
+    limit: int = 10,
+) -> Dict[str, List[str]]:
+    """
+    Fetch similar artists for each name via Last.fm artist.getSimilar.
+    Returns {artist_name: [similar_names]}. Results are disk-cached.
+    Returns empty list per artist on any failure — never raises.
+    """
+    cache = _load_lastfm_cache()
+    result: Dict[str, List[str]] = {}
+    changed = False
+    for name in artist_names:
+        key = f"sim:{name.lower()}"
+        if key in cache:
+            result[name] = cache[key]
+            continue
+        try:
+            resp = requests.get(
+                "https://ws.audioscrobbler.com/2.0/",
+                params={
+                    "method": "artist.getSimilar",
+                    "artist": name,
+                    "api_key": api_key,
+                    "format": "json",
+                    "limit": limit,
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            similar = [
+                a["name"]
+                for a in data.get("similarartists", {}).get("artist", [])
+            ]
+            cache[key] = similar
+            result[name] = similar
+            changed = True
+        except Exception as exc:
+            LOG.debug(f"Last.fm getSimilar failed for '{name}': {exc}")
+            result[name] = []
+        time.sleep(0.05)
+    if changed:
+        _save_lastfm_cache(cache)
+    return result
+
+
+def harvest_via_lastfm(
+    sp: spotipy.Spotify,
+    profile: dict,
+    quota: int,
+    exclude_ids: Set[str],
+    lastfm_api_key: str,
+) -> List[dict]:
+    """
+    Discover tracks: Last.fm similar artists → Spotify artist search → top tracks.
+    Returns empty list silently on failure so callers fall through to other methods.
+    """
+    seed_names = list({
+        t.get("artist", "") for t in profile["top_tracks"] if t.get("artist")
+    })[:5]
+    if not seed_names:
+        return []
+
+    similar_map = fetch_lastfm_similar_artists(seed_names, lastfm_api_key, limit=8)
+    seen_names: Set[str] = {n.lower() for n in seed_names}
+    similar_names: List[str] = []
+    for similars in similar_map.values():
+        for n in similars:
+            if n.lower() not in seen_names:
+                similar_names.append(n)
+                seen_names.add(n.lower())
+
+    candidates: List[dict] = []
+    seen_ids: Set[str] = set()
+    want = quota * 4
+
+    for artist_name in similar_names[:20]:
+        if len(candidates) >= want:
+            break
+        try:
+            res = spotify_retry(
+                sp.search, q=f'artist:"{artist_name}"', type="artist", limit=1
+            )
+            items = (res.get("artists") or {}).get("items", [])
+            if not items:
+                continue
+            a = items[0]
+            top = spotify_retry(sp.artist_top_tracks, a["id"], country="US")
+            for t in top.get("tracks", [])[:6]:
+                tid = t["id"]
+                if tid in seen_ids or tid in exclude_ids:
+                    continue
+                candidates.append({
+                    "spotify_id": tid,
+                    "name": t["name"],
+                    "artist": t["artists"][0]["name"] if t.get("artists") else artist_name,
+                    "uri": t["uri"],
+                    "cluster_id": profile["id"],
+                    "rel_genres": a.get("genres", []),
+                    "rel_popularity": a.get("popularity", 50),
+                })
+                seen_ids.add(tid)
+        except Exception as exc:
+            LOG.debug(f"Last.fm harvest failed for '{artist_name}': {exc}")
+        time.sleep(0.1)
+
+    LOG.debug(
+        f"  Cluster {profile['id']}: {len(candidates)} candidates via Last.fm (quota={quota})"
+    )
+    return candidates
+
+
+# ── Genre-search fallback ─────────────────────────────────────────────────────
+
+def _cluster_top_genres(profile: dict, top_n: int = 6) -> List[str]:
+    """Derive top genre strings from a cluster profile's top_tracks."""
+    freq: Dict[str, float] = defaultdict(float)
+    for t in profile.get("top_tracks", []):
+        for g in t.get("_genres", []):
+            freq[g] += t.get("weight", 1.0)
+    return sorted(freq, key=freq.get, reverse=True)[:top_n]  # type: ignore[arg-type]
+
+
+def _harvest_via_genre_search(
+    sp: spotipy.Spotify,
+    genres: List[str],
+    quota: int,
+    exclude_ids: Set[str],
+    cluster_id: int,
+) -> List[dict]:
+    """Last-resort discovery using Spotify genre search queries."""
+    candidates: List[dict] = []
+    seen: Set[str] = set()
+    want = quota * 4
+
+    for genre in genres[:6]:
+        if len(candidates) >= want:
+            break
+        try:
+            results = spotify_retry(
+                sp.search, q=f'genre:"{genre}"', type="track", limit=50
+            )
+            for t in (results.get("tracks") or {}).get("items", []):
+                tid = t["id"]
+                if tid in seen or tid in exclude_ids:
+                    continue
+                candidates.append({
+                    "spotify_id": tid,
+                    "name": t["name"],
+                    "artist": t["artists"][0]["name"] if t.get("artists") else "Unknown",
+                    "uri": t["uri"],
+                    "cluster_id": cluster_id,
+                    "rel_genres": [genre],
+                    "rel_popularity": t.get("popularity", 50),
+                })
+                seen.add(tid)
+        except Exception as exc:
+            LOG.debug(f"Genre search '{genre}': {exc}")
+        time.sleep(0.1)
+
+    return candidates
+
+
 def harvest_via_related_artists(
     sp: spotipy.Spotify,
     profile: dict,
@@ -595,20 +808,24 @@ def harvest_via_related_artists(
 ) -> List[dict]:
     """
     Discovery via related-artists → top-tracks (unrestricted endpoints).
-    For each cluster: take top seed artists → fetch their related artists →
-    fetch top tracks of each related artist → filter known tracks.
+    404s are treated as non-fatal: if all seeds 404, or too few candidates are
+    gathered, automatically supplements with genre-search so the pipeline
+    always produces results.
     """
     seed_artist_ids = list({
         t.get("artist_id", "") for t in profile["top_tracks"] if t.get("artist_id")
     })[:6]
 
     if not seed_artist_ids:
-        LOG.warning(f"Cluster {profile['id']}: no seed artist IDs, skipping")
-        return []
+        LOG.info(f"  Cluster {profile['id']}: no seed artist IDs — using genre search")
+        return _harvest_via_genre_search(
+            sp, _cluster_top_genres(profile), quota, exclude_ids, profile["id"]
+        )
 
     candidates: List[dict] = []
     seen: Set[str] = set()
-    want = quota * 4  # gather 4× quota, best will be selected later
+    want = quota * 4
+    n_404 = 0
 
     for seed_id in seed_artist_ids:
         if len(candidates) >= want:
@@ -616,6 +833,12 @@ def harvest_via_related_artists(
         try:
             related = spotify_retry(sp.artist_related_artists, seed_id)
             related_artists = related.get("artists", [])[:8]
+        except spotipy.exceptions.SpotifyException as exc:
+            if exc.http_status == 404:
+                n_404 += 1
+                continue
+            LOG.debug(f"  related-artists failed for {seed_id}: {exc}")
+            continue
         except Exception as exc:
             LOG.debug(f"  related-artists failed for {seed_id}: {exc}")
             continue
@@ -649,6 +872,22 @@ def harvest_via_related_artists(
             time.sleep(0.05)
         time.sleep(0.1)
 
+    # Supplement with genre search if related-artists produced too few results
+    if len(candidates) < quota:
+        if n_404:
+            LOG.info(
+                f"  Cluster {profile['id']}: related-artists returned 404 for "
+                f"{n_404}/{len(seed_artist_ids)} seeds — supplementing with genre search"
+            )
+        extra = _harvest_via_genre_search(
+            sp, _cluster_top_genres(profile),
+            max(quota - len(candidates), quota),  # always gather a full quota's worth
+            exclude_ids, profile["id"],
+        )
+        # Merge without duplicating IDs already in candidates
+        existing_ids = {c["spotify_id"] for c in candidates}
+        candidates.extend(c for c in extra if c["spotify_id"] not in existing_ids)
+
     LOG.debug(
         f"  Cluster {profile['id']} [{profile['description']}]: "
         f"{len(candidates)} candidates via related artists (quota={quota})"
@@ -661,22 +900,28 @@ def score_and_select_by_genre(
     profiles: List[dict],
     quotas: List[int],
     total_size: int,
+    fingerprint: Optional[dict] = None,
 ) -> List[dict]:
     """
     Select final tracks using genre overlap scoring (no audio features needed).
-    Each candidate's related-artist genres are compared against the cluster's
-    top genres. Popularity is used as a secondary signal.
+
+    When a taste fingerprint is provided, genre overlap uses the user's weighted
+    genre preferences instead of binary cluster-top-genre membership — this rewards
+    candidates whose genres appear frequently in the user's own listening history.
+    Popularity is used as a 20% secondary signal.
     """
-    # Build top-genre sets for each cluster from its member tracks
     profile_top_genres: Dict[int, Set[str]] = {}
     for p in profiles:
         freq: Dict[str, float] = defaultdict(float)
         for t in p.get("top_tracks", []):
-            for g in t.get("_genres", []):  # attached during run_pipeline
+            for g in t.get("_genres", []):
                 freq[g] += t.get("weight", 1.0)
-        profile_top_genres[p["id"]] = set(sorted(freq, key=freq.get, reverse=True)[:15])  # type: ignore[arg-type]
+        profile_top_genres[p["id"]] = set(
+            sorted(freq, key=freq.get, reverse=True)[:15]  # type: ignore[arg-type]
+        )
 
-    # Deduplicate
+    fp_genres = (fingerprint or {}).get("genres", {})
+
     seen: Set[str] = set()
     unique: List[dict] = []
     for c in candidates:
@@ -684,23 +929,30 @@ def score_and_select_by_genre(
             unique.append(c)
             seen.add(c["spotify_id"])
 
-    # Score
     by_cluster: Dict[int, List[dict]] = defaultdict(list)
     for c in unique:
         cid = c["cluster_id"]
         top_genres = profile_top_genres.get(cid, set())
         cand_genres = set(c.get("rel_genres", []))
-        overlap = len(cand_genres & top_genres) / max(len(top_genres), 1)
+
+        if fp_genres and top_genres:
+            # Weighted: sum of user's normalized preference for each matching genre
+            overlap = sum(fp_genres.get(g, 0.0) for g in cand_genres) / max(len(top_genres), 1)
+        else:
+            overlap = len(cand_genres & top_genres) / max(len(top_genres), 1)
+
         pop = c.get("rel_popularity", 50) / 100.0
         c = c.copy()
         c["fit_score"] = overlap * 0.80 + pop * 0.20
         by_cluster[cid].append(c)
 
-    # Select quota per cluster, shuffle to interleave moods
     final: List[dict] = []
     for profile, quota in zip(profiles, quotas):
-        pool = sorted(by_cluster.get(profile["id"], []),
-                      key=lambda x: x.get("fit_score", 0.0), reverse=True)
+        pool = sorted(
+            by_cluster.get(profile["id"], []),
+            key=lambda x: x.get("fit_score", 0.0),
+            reverse=True,
+        )
         selected = pool[:quota]
         final.extend(selected)
         LOG.info(
@@ -1074,6 +1326,27 @@ def score_and_select(
 # STEP 6 — Playlist creation
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _radio_order(tracks: List[dict]) -> List[dict]:
+    """
+    Reorder tracks so taste clusters interleave rather than block together.
+    Round-robins across clusters in a shuffled order so the playlist feels like
+    continuous radio rather than back-to-back same-genre sections.
+    """
+    by_cluster: Dict[int, List[dict]] = defaultdict(list)
+    for t in tracks:
+        by_cluster[t["cluster_id"]].append(t)
+
+    cluster_ids = list(by_cluster.keys())
+    random.shuffle(cluster_ids)
+
+    result: List[dict] = []
+    while any(by_cluster[cid] for cid in cluster_ids):
+        for cid in cluster_ids:
+            if by_cluster[cid]:
+                result.append(by_cluster[cid].pop(0))
+    return result
+
+
 def create_playlist(
     sp: spotipy.Spotify,
     user_id: str,
@@ -1212,6 +1485,8 @@ def run_pipeline(
         put(("step", 3, 6, "Resolving track IDs and clustering…"))
         resolved = resolve_tracks_to_ids(sp, tracks)
         feat_map = fetch_audio_features(sp, [t["spotify_id"] for t in resolved])
+        lastfm_key = config.get("lastfm_api_key", "").strip()
+        fingerprint: Optional[dict] = None
 
         if feat_map:
             # ── Audio-features path ───────────────────────────────────
@@ -1228,7 +1503,6 @@ def run_pipeline(
             LOG.info("Audio-features blocked (403) — falling back to genre-based clustering")
             put(("step", 3, 6, "Clustering by genre (audio-features endpoint unavailable)…"))
 
-            # Fetch full track objects to extract primary artist IDs
             track_ids = [t["spotify_id"] for t in resolved]
             track_details = fetch_track_details(sp, track_ids)
             for t in resolved:
@@ -1248,7 +1522,6 @@ def run_pipeline(
             labels, _ = cluster_tracks(valid_tracks, matrix, n_clusters)
             profiles = build_cluster_profiles(valid_tracks, matrix, labels, len(set(labels)))
 
-            # Replace generic "Mixed" descriptions with top genres per cluster
             for p in profiles:
                 freq: Dict[str, float] = defaultdict(float)
                 for t in p["top_tracks"]:
@@ -1260,10 +1533,23 @@ def run_pipeline(
                     if top_genres else f"Cluster {p['id']}"
                 )
 
-            # Attach genre lists to each top-track so score_and_select_by_genre can use them
             for p in profiles:
                 for t in p["top_tracks"]:
                     t["_genres"] = artist_genres.get(t.get("artist_id", ""), {}).get("genres", [])
+
+            fingerprint = build_taste_fingerprint(valid_tracks, artist_genres)
+            LOG.info(
+                f"Taste fingerprint: {len(fingerprint['genres'])} genre weights, "
+                f"{len(fingerprint['artists'])} artist weights"
+            )
+            if lastfm_key:
+                LOG.info("Last.fm API key found — will use for discovery")
+            else:
+                LOG.info(
+                    "No Last.fm API key in config — using related-artists + genre search. "
+                    "Add \"lastfm_api_key\": \"<key>\" to config.json for better discovery "
+                    "(free key at https://www.last.fm/api/account/create)"
+                )
 
         liked_ids: Set[str] = {
             t["spotify_id"] for t in valid_tracks if t.get("is_liked") and t.get("spotify_id")
@@ -1286,7 +1572,19 @@ def run_pipeline(
             LOG.info(f"  → Cluster {profile['id']} [{profile['description']}] quota={quota}")
             if feat_map:
                 all_candidates.extend(harvest_recommendations(sp, profile, quota, exclude_ids))
+            elif lastfm_key:
+                # Last.fm collaborative filtering → Spotify top tracks
+                cluster_cands = harvest_via_lastfm(sp, profile, quota, exclude_ids, lastfm_key)
+                if len(cluster_cands) < quota // 2:
+                    # Supplement if Last.fm didn't produce enough
+                    cluster_cands.extend(
+                        harvest_via_related_artists(
+                            sp, profile, quota - len(cluster_cands), exclude_ids
+                        )
+                    )
+                all_candidates.extend(cluster_cands)
             else:
+                # related-artists with automatic genre-search cascade on 404
                 all_candidates.extend(harvest_via_related_artists(sp, profile, quota, exclude_ids))
 
         LOG.info(f"Total raw candidates: {len(all_candidates)}")
@@ -1303,7 +1601,10 @@ def run_pipeline(
         if feat_map:
             final_tracks = score_and_select(sp, all_candidates, profiles, quotas, target_size)
         else:
-            final_tracks = score_and_select_by_genre(all_candidates, profiles, quotas, target_size)
+            final_tracks = score_and_select_by_genre(
+                all_candidates, profiles, quotas, target_size, fingerprint=fingerprint
+            )
+        final_tracks = _radio_order(final_tracks)
         LOG.info(f"Final selection: {len(final_tracks)} tracks")
 
         profile_lookup = {p["id"]: p for p in profiles}
