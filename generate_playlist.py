@@ -25,6 +25,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import spotipy
@@ -323,15 +324,47 @@ def build_weighted_tracks(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_spotify_client(config: dict) -> Tuple[spotipy.Spotify, str]:
-    """Authenticate via OAuth Authorization Code flow. Returns (client, user_id)."""
+    """
+    Authenticate via OAuth Authorization Code flow. Returns (client, user_id).
+
+    Uses a manual URL-paste flow instead of a local HTTP server so that
+    browsers that silently upgrade http:// to https:// (Chrome HSTS, Edge)
+    don't break the redirect capture.  On subsequent runs the cached token
+    is reused automatically and no browser interaction is needed.
+    """
     auth = SpotifyOAuth(
         client_id=config["client_id"],
         client_secret=config["client_secret"],
         redirect_uri=REDIRECT_URI,
         scope=SCOPE,
         cache_path=CACHE_FILE,
-        open_browser=True,
+        open_browser=False,  # we drive the flow manually below
     )
+
+    # Reuse cached token if it's still valid (or can be refreshed)
+    cached = auth.validate_token(auth.cache_handler.get_cached_token())
+    if not cached:
+        auth_url = auth.get_authorize_url()
+        print("\n" + "=" * 62)
+        print("  SPOTIFY LOGIN REQUIRED")
+        print("=" * 62)
+        print(f"\n[1] Open this URL in your browser:\n\n    {auth_url}\n")
+        print("[2] Log in to Spotify and click Agree.")
+        print(f"[3] Your browser will redirect to a URL starting with:")
+        print(f"      {REDIRECT_URI}?code=...")
+        print("    The page will show a connection error — that is EXPECTED.")
+        print("[4] Copy the FULL URL from your browser's address bar.\n")
+        redirect_url = input("Paste the full redirect URL here: ").strip()
+
+        code = parse_qs(urlparse(redirect_url).query).get("code", [None])[0]
+        if not code:
+            raise RuntimeError(
+                "No authorization code found in the pasted URL.\n"
+                "Make sure you copied the complete URL from the address bar "
+                "after Spotify redirected you."
+            )
+        auth.get_access_token(code)
+
     sp = spotipy.Spotify(auth_manager=auth, requests_timeout=30)
     me = spotify_retry(sp.current_user)
     LOG.info(f"Authenticated as: {me['display_name']} ({me['id']})")
