@@ -8,16 +8,19 @@ seeding Spotify recommendations from each cluster proportionally.
 
 Usage:
     python generate_playlist.py --data-dir ./my_spotify_data --size 175
+    python generate_playlist.py --data-dir ./my_spotify_data.zip --size 175
     python generate_playlist.py --data-dir ./my_spotify_data --size 200 --clusters 8
 """
 
 import argparse
+import fnmatch
 import json
 import logging
 import math
 import os
 import random
 import time
+import zipfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -126,18 +129,40 @@ def spotify_retry(fn, *args, max_retries: int = 6, **kwargs):
 # STEP 1 — Parse & weight listening data
 # ══════════════════════════════════════════════════════════════════════════════
 
-def load_liked_tracks(data_dir: Path) -> Dict[str, dict]:
+def _open_data_file(name: str, data_dir: Path, zf: Optional[zipfile.ZipFile]):
     """
-    Read YourLibrary.json.
+    Open a JSON data file from either a directory or a zip archive.
+    For zips, matches on the filename alone (ignoring any subdirectory prefix
+    Spotify may include in the archive).
+    Returns a file-like object, or raises FileNotFoundError.
+    """
+    if zf is not None:
+        # Match by basename so subdirectory structure inside the zip doesn't matter
+        matches = [e for e in zf.namelist() if os.path.basename(e) == name]
+        if not matches:
+            raise FileNotFoundError(f"{name} not found in zip")
+        return zf.open(matches[0])
+    path = data_dir / name
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    return open(path, encoding="utf-8")
+
+
+def load_liked_tracks(
+    data_dir: Path, zf: Optional[zipfile.ZipFile] = None
+) -> Dict[str, dict]:
+    """
+    Read YourLibrary.json from a directory or zip archive.
     Returns a dict keyed by lowercase 'artist||track' strings.
     Each entry carries a base weight of 3.0 for being explicitly liked.
     """
-    path = data_dir / "YourLibrary.json"
-    if not path.exists():
-        LOG.warning(f"YourLibrary.json not found at {path}")
+    try:
+        f = _open_data_file("YourLibrary.json", data_dir, zf)
+    except FileNotFoundError as exc:
+        LOG.warning(str(exc))
         return {}
 
-    with open(path, encoding="utf-8") as f:
+    with f:
         data = json.load(f)
 
     liked: Dict[str, dict] = {}
@@ -154,25 +179,38 @@ def load_liked_tracks(data_dir: Path) -> Dict[str, dict]:
     return liked
 
 
-def load_streaming_history(data_dir: Path) -> Tuple[Dict[str, float], Dict[str, int]]:
+def load_streaming_history(
+    data_dir: Path, zf: Optional[zipfile.ZipFile] = None
+) -> Tuple[Dict[str, float], Dict[str, int]]:
     """
-    Read all StreamingHistory_music_*.json files (handles both old and new export formats).
+    Read all StreamingHistory_music_*.json files from a directory or zip archive.
+    Handles both old (artistName/trackName/msPlayed) and new (master_metadata_*/ms_played)
+    Spotify export formats.
 
     Returns:
         play_scores  – log-scaled listening score per track key
         play_counts  – raw play count per track key (for heavy-play detection)
     """
-    files = sorted(data_dir.glob("StreamingHistory_music_*.json"))
-    if not files:
+    # Collect the list of matching filenames from whichever source we have
+    if zf is not None:
+        history_names = sorted(
+            os.path.basename(e)
+            for e in zf.namelist()
+            if fnmatch.fnmatch(os.path.basename(e), "StreamingHistory_music_*.json")
+        )
+    else:
+        history_names = sorted(p.name for p in data_dir.glob("StreamingHistory_music_*.json"))
+
+    if not history_names:
         LOG.warning("No StreamingHistory_music_*.json files found")
         return {}, {}
 
     play_ms: Dict[str, float] = defaultdict(float)
     play_counts: Dict[str, int] = defaultdict(int)
 
-    for fp in files:
-        LOG.debug(f"Loading {fp.name}")
-        with open(fp, encoding="utf-8") as f:
+    for name in history_names:
+        LOG.debug(f"Loading {name}")
+        with _open_data_file(name, data_dir, zf) as f:
             entries = json.load(f)
 
         for entry in entries:
@@ -775,7 +813,10 @@ def main() -> int:
     parser.add_argument(
         "--data-dir",
         default="./my_spotify_data",
-        help="Path to Spotify data export folder (default: ./my_spotify_data)",
+        help=(
+            "Path to your Spotify data export — either an extracted folder "
+            "or the original .zip file (default: ./my_spotify_data)"
+        ),
     )
     parser.add_argument(
         "--size",
@@ -800,14 +841,33 @@ def main() -> int:
     if args.verbose:
         LOG.setLevel(logging.DEBUG)
 
-    data_dir = Path(args.data_dir)
+    data_path = Path(args.data_dir)
     LOG.info("=== Spotify Radio Generator ===")
-    LOG.info(f"Target: {args.size} tracks | Clusters: {args.clusters} | Data: {data_dir.resolve()}")
+    LOG.info(f"Target: {args.size} tracks | Clusters: {args.clusters} | Data: {data_path.resolve()}")
 
     # ── 1. Load & weight data ────────────────────────────────────────────────
     LOG.info("\n[1/6] Parsing Spotify data export...")
-    liked = load_liked_tracks(data_dir)
-    play_scores, play_counts = load_streaming_history(data_dir)
+
+    # Accept either a directory or a .zip file — no extraction required
+    zf: Optional[zipfile.ZipFile] = None
+    data_dir = data_path  # used only when not reading from a zip
+    if data_path.suffix.lower() == ".zip":
+        if not data_path.exists():
+            LOG.error(f"Zip file not found: {data_path}")
+            return 1
+        LOG.info(f"Reading directly from zip: {data_path.name}")
+        zf = zipfile.ZipFile(data_path, "r")
+    elif not data_path.is_dir():
+        LOG.error(f"--data-dir must be a folder or a .zip file: {data_path}")
+        return 1
+
+    try:
+        liked = load_liked_tracks(data_dir, zf)
+        play_scores, play_counts = load_streaming_history(data_dir, zf)
+    finally:
+        if zf is not None:
+            zf.close()
+
     tracks, heavy_keys = build_weighted_tracks(liked, play_scores, play_counts, top_n=500)
 
     if not tracks:
