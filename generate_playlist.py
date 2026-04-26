@@ -18,7 +18,10 @@ import json
 import logging
 import math
 import os
+import queue
 import random
+import sys
+import threading
 import time
 import zipfile
 from collections import defaultdict
@@ -52,7 +55,8 @@ TEMPO_RANGE = TEMPO_MAX - TEMPO_MIN
 
 CONFIG_FILE = "config.json"
 CACHE_FILE = ".spotify_cache"
-REDIRECT_URI = "http://localhost:8888/callback"
+# 127.0.0.1 avoids Chrome/Edge HSTS upgrades that break http://localhost redirects
+REDIRECT_URI = "http://127.0.0.1:8888/callback"
 SCOPE = (
     "user-library-read "
     "playlist-modify-private "
@@ -78,6 +82,38 @@ def _build_logger() -> logging.Logger:
 LOG = _build_logger()
 
 
+# ── Queue log handler (used by run_pipeline to route logs to the GUI) ──────────
+
+class _QueueLogHandler(logging.Handler):
+    """Forwards log records into a queue.Queue so the GUI thread can consume them."""
+    def __init__(self, q: queue.Queue) -> None:
+        super().__init__()
+        self.q = q
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.q.put(("log", record.levelname, self.format(record)))
+
+
+# ── Features cache (avoids re-fetching audio features on every run) ────────────
+
+_FEATURES_CACHE_FILE = ".audio_features_cache.json"
+
+
+def _load_features_cache() -> Dict[str, dict]:
+    if os.path.exists(_FEATURES_CACHE_FILE):
+        try:
+            with open(_FEATURES_CACHE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_features_cache(cache: Dict[str, dict]) -> None:
+    with open(_FEATURES_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def load_or_create_config() -> dict:
@@ -97,6 +133,39 @@ def load_or_create_config() -> dict:
         json.dump(cfg, f, indent=2)
     print(f"Saved to {CONFIG_FILE}\n")
     return cfg
+
+
+def _make_auth(config: dict) -> SpotifyOAuth:
+    return SpotifyOAuth(
+        client_id=config["client_id"],
+        client_secret=config["client_secret"],
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE,
+        cache_path=CACHE_FILE,
+        open_browser=False,
+    )
+
+
+def check_token(config: dict) -> bool:
+    """Return True if a valid (or auto-refreshable) token exists in the cache."""
+    auth = _make_auth(config)
+    return auth.validate_token(auth.cache_handler.get_cached_token()) is not None
+
+
+def get_auth_url(config: dict) -> str:
+    """Return the Spotify OAuth authorization URL for the manual-paste flow."""
+    return _make_auth(config).get_authorize_url()
+
+
+def complete_auth(config: dict, redirect_url: str) -> None:
+    """Exchange a redirect URL (containing ?code=…) for an access token."""
+    code = parse_qs(urlparse(redirect_url).query).get("code", [None])[0]
+    if not code:
+        raise ValueError(
+            "No authorization code found in that URL. "
+            "Make sure you copied the full redirect URL from the browser address bar."
+        )
+    _make_auth(config).get_access_token(code)
 
 
 # ── Resilient Spotify calls ───────────────────────────────────────────────────
@@ -325,46 +394,13 @@ def build_weighted_tracks(
 
 def create_spotify_client(config: dict) -> Tuple[spotipy.Spotify, str]:
     """
-    Authenticate via OAuth Authorization Code flow. Returns (client, user_id).
+    Create an authenticated Spotify client from a cached token.
 
-    Uses a manual URL-paste flow instead of a local HTTP server so that
-    browsers that silently upgrade http:// to https:// (Chrome HSTS, Edge)
-    don't break the redirect capture.  On subsequent runs the cached token
-    is reused automatically and no browser interaction is needed.
+    Auth must already be completed (via check_token / complete_auth, or by
+    the CLI flow in main()).  Spotipy will auto-refresh the token if it has
+    expired but the refresh token is still valid.
     """
-    auth = SpotifyOAuth(
-        client_id=config["client_id"],
-        client_secret=config["client_secret"],
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-        cache_path=CACHE_FILE,
-        open_browser=False,  # we drive the flow manually below
-    )
-
-    # Reuse cached token if it's still valid (or can be refreshed)
-    cached = auth.validate_token(auth.cache_handler.get_cached_token())
-    if not cached:
-        auth_url = auth.get_authorize_url()
-        print("\n" + "=" * 62)
-        print("  SPOTIFY LOGIN REQUIRED")
-        print("=" * 62)
-        print(f"\n[1] Open this URL in your browser:\n\n    {auth_url}\n")
-        print("[2] Log in to Spotify and click Agree.")
-        print(f"[3] Your browser will redirect to a URL starting with:")
-        print(f"      {REDIRECT_URI}?code=...")
-        print("    The page will show a connection error — that is EXPECTED.")
-        print("[4] Copy the FULL URL from your browser's address bar.\n")
-        redirect_url = input("Paste the full redirect URL here: ").strip()
-
-        code = parse_qs(urlparse(redirect_url).query).get("code", [None])[0]
-        if not code:
-            raise RuntimeError(
-                "No authorization code found in the pasted URL.\n"
-                "Make sure you copied the complete URL from the address bar "
-                "after Spotify redirected you."
-            )
-        auth.get_access_token(code)
-
+    auth = _make_auth(config)
     sp = spotipy.Spotify(auth_manager=auth, requests_timeout=30)
     me = spotify_retry(sp.current_user)
     LOG.info(f"Authenticated as: {me['display_name']} ({me['id']})")
@@ -429,23 +465,33 @@ def resolve_tracks_to_ids(sp: spotipy.Spotify, tracks: List[dict]) -> List[dict]
 def fetch_audio_features(
     sp: spotipy.Spotify, track_ids: List[str]
 ) -> Dict[str, dict]:
-    """Fetch audio features in 100-track batches (Spotify API maximum)."""
-    features_map: Dict[str, dict] = {}
-    batch_size = 100
-    n_batches = math.ceil(len(track_ids) / batch_size)
+    """
+    Fetch audio features in 100-track batches, using a local disk cache
+    (.audio_features_cache.json) to avoid redundant API calls on repeat runs.
+    """
+    cache = _load_features_cache()
+    uncached = [tid for tid in track_ids if tid not in cache]
 
-    LOG.info(f"Fetching audio features for {len(track_ids)} tracks ({n_batches} batches)...")
-    for i in range(n_batches):
-        batch = track_ids[i * batch_size : (i + 1) * batch_size]
-        LOG.debug(f"  Batch {i + 1}/{n_batches}")
-        results = spotify_retry(sp.audio_features, batch) or []
-        for feat in results:
-            if feat:
-                features_map[feat["id"]] = feat
-        time.sleep(0.15)
+    if uncached:
+        batch_size = 100
+        n_batches = math.ceil(len(uncached) / batch_size)
+        LOG.info(
+            f"Fetching audio features: {len(uncached)} new tracks "
+            f"({len(track_ids) - len(uncached)} served from cache, {n_batches} API batches)..."
+        )
+        for i in range(n_batches):
+            batch = uncached[i * batch_size : (i + 1) * batch_size]
+            LOG.debug(f"  Batch {i + 1}/{n_batches}")
+            results = spotify_retry(sp.audio_features, batch) or []
+            for feat in results:
+                if feat:
+                    cache[feat["id"]] = feat
+            time.sleep(0.15)
+        _save_features_cache(cache)
+    else:
+        LOG.info(f"Audio features: all {len(track_ids)} tracks loaded from cache — no API calls needed")
 
-    LOG.info(f"Audio features: {len(features_map)}/{len(track_ids)} tracks resolved")
-    return features_map
+    return {tid: cache[tid] for tid in track_ids if tid in cache}
 
 
 def _normalize_tempo(bpm: float) -> float:
@@ -864,7 +910,168 @@ def print_summary(tracks: List[dict], profiles: List[dict], url: str) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Entry point
+# Pipeline (shared by CLI and GUI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run_pipeline(
+    settings: dict,
+    msg_queue: queue.Queue,
+    stop_event: threading.Event,
+) -> None:
+    """
+    Run the full playlist generation pipeline in a background thread.
+
+    settings keys:
+        data_dir  – path to the Spotify data export (folder or .zip)
+        size      – target playlist track count
+        clusters  – number of taste-mood clusters
+
+    Messages placed into msg_queue:
+        ("log",   levelname, text)                 – log line
+        ("step",  n, total, description)           – major step started
+        ("track", name, artist, cluster_desc)      – track selected for playlist
+        ("done",  playlist_url, summary_dict)      – success
+        ("error", message)                         – fatal failure
+    """
+    def put(msg: tuple) -> None:
+        msg_queue.put(msg)
+
+    def check_stop() -> None:
+        if stop_event.is_set():
+            raise InterruptedError("Stopped by user")
+
+    # Route all LOG.* calls into the queue for this run
+    handler = _QueueLogHandler(msg_queue)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOG.addHandler(handler)
+
+    try:
+        data_path = Path(settings["data_dir"])
+        target_size = int(settings.get("size", 175))
+        n_clusters = int(settings.get("clusters", 6))
+
+        # ── Step 1: parse data ───────────────────────────────────────
+        put(("step", 1, 6, "Parsing Spotify data export…"))
+        check_stop()
+
+        zf: Optional[zipfile.ZipFile] = None
+        data_dir = data_path
+        if data_path.suffix.lower() == ".zip":
+            if not data_path.exists():
+                put(("error", f"Zip not found: {data_path}"))
+                return
+            zf = zipfile.ZipFile(data_path, "r")
+        elif not data_path.is_dir():
+            put(("error", f"Data path must be a folder or .zip: {data_path}"))
+            return
+
+        try:
+            liked = load_liked_tracks(data_dir, zf)
+            play_scores, play_counts, track_uris = load_streaming_history(data_dir, zf)
+        finally:
+            if zf:
+                zf.close()
+
+        tracks, heavy_keys = build_weighted_tracks(
+            liked, play_scores, play_counts, track_uris, top_n=500
+        )
+        if not tracks:
+            put(("error", "No tracks found in the data export."))
+            return
+
+        check_stop()
+
+        # ── Step 2: connect to Spotify ───────────────────────────────
+        put(("step", 2, 6, "Connecting to Spotify…"))
+        config = load_or_create_config()
+        sp, user_id = create_spotify_client(config)
+        check_stop()
+
+        # ── Step 3: resolve IDs, fetch features, cluster ─────────────
+        put(("step", 3, 6, "Resolving track IDs and clustering audio fingerprints…"))
+        resolved = resolve_tracks_to_ids(sp, tracks)
+        feat_map = fetch_audio_features(sp, [t["spotify_id"] for t in resolved])
+        matrix, valid_tracks = build_feature_matrix(resolved, feat_map)
+        LOG.info(f"Tracks with audio features: {len(valid_tracks)}")
+
+        if len(valid_tracks) < n_clusters * 2:
+            put(("error", "Too few tracks with audio features for clustering."))
+            return
+
+        labels, _ = cluster_tracks(valid_tracks, matrix, n_clusters)
+        profiles = build_cluster_profiles(valid_tracks, matrix, labels, len(set(labels)))
+
+        liked_ids: Set[str] = {
+            t["spotify_id"] for t in valid_tracks if t.get("is_liked") and t.get("spotify_id")
+        }
+        heavy_ids: Set[str] = {
+            t["spotify_id"] for t in valid_tracks if t["key"] in heavy_keys and t.get("spotify_id")
+        }
+        exclude_ids = liked_ids | heavy_ids
+        LOG.info(f"Excluding {len(exclude_ids)} already-known tracks from recommendations")
+        check_stop()
+
+        # ── Step 4: harvest recommendations ─────────────────────────
+        put(("step", 4, 6, "Harvesting recommendations from each cluster…"))
+        quotas = compute_quotas(profiles, target_size)
+        LOG.info(f"Cluster quotas: {quotas} (total={sum(quotas)})")
+
+        all_candidates: List[dict] = []
+        for profile, quota in zip(profiles, quotas):
+            check_stop()
+            LOG.info(f"  → Cluster {profile['id']} [{profile['description']}] quota={quota}")
+            all_candidates.extend(harvest_recommendations(sp, profile, quota, exclude_ids))
+
+        LOG.info(f"Total raw candidates: {len(all_candidates)}")
+        if not all_candidates:
+            put(("error",
+                 "No recommendation candidates found.\n"
+                 "The Spotify recommendations endpoint requires Extended Quota Mode — "
+                 "visit developer.spotify.com → your app → Request Extension."))
+            return
+
+        check_stop()
+
+        # ── Step 5: score, deduplicate, select ───────────────────────
+        put(("step", 5, 6, "Scoring and selecting final tracks…"))
+        final_tracks = score_and_select(sp, all_candidates, profiles, quotas, target_size)
+        LOG.info(f"Final selection: {len(final_tracks)} tracks")
+
+        profile_lookup = {p["id"]: p for p in profiles}
+        for t in final_tracks:
+            mood = profile_lookup.get(t["cluster_id"], {}).get("description", "")
+            put(("track", t.get("name", ""), t.get("artist", ""), mood))
+
+        check_stop()
+
+        # ── Step 6: create playlist ──────────────────────────────────
+        put(("step", 6, 6, "Creating Spotify playlist…"))
+        playlist_name = f"All Stations Mix — {datetime.now().strftime('%Y-%m-%d')}"
+        url = create_playlist(sp, user_id, final_tracks, playlist_name)
+
+        artist_counts: Dict[str, int] = defaultdict(int)
+        mood_counts: Dict[str, int] = defaultdict(int)
+        for t in final_tracks:
+            artist_counts[t.get("artist", "Unknown")] += 1
+            mood_counts[profile_lookup.get(t["cluster_id"], {}).get("description", "?")] += 1
+
+        put(("done", url, {
+            "total": len(final_tracks),
+            "mood_counts": dict(sorted(mood_counts.items(), key=lambda x: x[1], reverse=True)),
+            "top_artists": [a for a, _ in sorted(artist_counts.items(), key=lambda x: x[1], reverse=True)[:3]],
+        }))
+
+    except InterruptedError:
+        put(("error", "Generation stopped by user."))
+    except Exception as exc:
+        import traceback
+        put(("error", f"{exc}\n\n{traceback.format_exc()}"))
+    finally:
+        LOG.removeHandler(handler)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry point (CLI)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> int:
@@ -872,135 +1079,81 @@ def main() -> int:
         description="Generate a large personalized Spotify cross-genre discovery playlist."
     )
     parser.add_argument(
-        "--data-dir",
-        default="./my_spotify_data",
-        help=(
-            "Path to your Spotify data export — either an extracted folder "
-            "or the original .zip file (default: ./my_spotify_data)"
-        ),
+        "--data-dir", default="./my_spotify_data",
+        help="Path to your Spotify data export — folder or .zip (default: ./my_spotify_data)",
     )
-    parser.add_argument(
-        "--size",
-        type=int,
-        default=175,
-        help="Target number of tracks in the playlist (default: 175)",
-    )
-    parser.add_argument(
-        "--clusters",
-        type=int,
-        default=6,
-        help="Number of taste-mood clusters (default: 6)",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=True,
-        help="Verbose debug logging (default: on)",
-    )
+    parser.add_argument("--size", type=int, default=175,
+                        help="Target playlist track count (default: 175)")
+    parser.add_argument("--clusters", type=int, default=6,
+                        help="Number of taste-mood clusters (default: 6)")
+    parser.add_argument("--verbose", action="store_true", default=True)
     args = parser.parse_args()
 
     if args.verbose:
         LOG.setLevel(logging.DEBUG)
 
-    data_path = Path(args.data_dir)
-    LOG.info("=== Spotify Radio Generator ===")
-    LOG.info(f"Target: {args.size} tracks | Clusters: {args.clusters} | Data: {data_path.resolve()}")
+    print("=== Spotify Radio Generator ===")
 
-    # ── 1. Load & weight data ────────────────────────────────────────────────
-    LOG.info("\n[1/6] Parsing Spotify data export...")
-
-    # Accept either a directory or a .zip file — no extraction required
-    zf: Optional[zipfile.ZipFile] = None
-    data_dir = data_path  # used only when not reading from a zip
-    if data_path.suffix.lower() == ".zip":
-        if not data_path.exists():
-            LOG.error(f"Zip file not found: {data_path}")
-            return 1
-        LOG.info(f"Reading directly from zip: {data_path.name}")
-        zf = zipfile.ZipFile(data_path, "r")
-    elif not data_path.is_dir():
-        LOG.error(f"--data-dir must be a folder or a .zip file: {data_path}")
-        return 1
-
-    try:
-        liked = load_liked_tracks(data_dir, zf)
-        play_scores, play_counts, track_uris = load_streaming_history(data_dir, zf)
-    finally:
-        if zf is not None:
-            zf.close()
-
-    tracks, heavy_keys = build_weighted_tracks(
-        liked, play_scores, play_counts, track_uris, top_n=500
-    )
-
-    if not tracks:
-        LOG.error("No tracks found. Make sure --data-dir points to your Spotify data export.")
-        return 1
-
-    # ── 2. Auth ──────────────────────────────────────────────────────────────
-    LOG.info("\n[2/6] Authenticating with Spotify...")
+    # ── Auth (before spawning pipeline thread) ──────────────────────────────
     config = load_or_create_config()
-    sp, user_id = create_spotify_client(config)
-
-    # ── 3. Resolve IDs, features, cluster ───────────────────────────────────
-    LOG.info("\n[3/6] Resolving track IDs and clustering audio fingerprints...")
-    resolved = resolve_tracks_to_ids(sp, tracks)
-    all_ids = [t["spotify_id"] for t in resolved]
-
-    feat_map = fetch_audio_features(sp, all_ids)
-    matrix, valid_tracks = build_feature_matrix(resolved, feat_map)
-    LOG.info(f"Tracks with audio features: {len(valid_tracks)}")
-
-    if len(valid_tracks) < args.clusters * 2:
-        LOG.error("Too few tracks with audio features for clustering. Try a larger --data-dir.")
-        return 1
-
-    labels, _ = cluster_tracks(valid_tracks, matrix, args.clusters)
-    n_actual_clusters = len(set(labels))
-    profiles = build_cluster_profiles(valid_tracks, matrix, labels, n_actual_clusters)
-
-    # Build the exclusion set: liked tracks + heavily-played tracks
-    liked_ids: Set[str] = {
-        t["spotify_id"] for t in valid_tracks if t.get("is_liked") and t.get("spotify_id")
-    }
-    heavy_ids: Set[str] = {
-        t["spotify_id"] for t in valid_tracks if t["key"] in heavy_keys and t.get("spotify_id")
-    }
-    exclude_ids = liked_ids | heavy_ids
-    LOG.info(f"Excluding {len(exclude_ids)} already-known tracks from recommendations")
-
-    # ── 4. Harvest recommendations ───────────────────────────────────────────
-    LOG.info("\n[4/6] Harvesting recommendations from each cluster...")
-    quotas = compute_quotas(profiles, args.size)
-    LOG.info(f"Quotas per cluster: {quotas}  (total={sum(quotas)})")
-
-    all_candidates: List[dict] = []
-    for profile, quota in zip(profiles, quotas):
-        LOG.info(f"  → Cluster {profile['id']} [{profile['description']}] quota={quota}")
-        cands = harvest_recommendations(sp, profile, quota, exclude_ids)
-        all_candidates.extend(cands)
-
-    LOG.info(f"Total raw candidates collected: {len(all_candidates)}")
-
-    if not all_candidates:
-        LOG.error(
-            "No recommendation candidates collected.\n"
-            "  The Spotify recommendations endpoint requires Extended Quota Mode.\n"
-            "  Visit https://developer.spotify.com/dashboard → your app → Request Extension."
+    if not check_token(config):
+        print(
+            f"\nIMPORTANT: Add this Redirect URI to your Spotify app first:\n"
+            f"  {REDIRECT_URI}\n"
+            f"(dashboard.spotify.com → your app → Edit Settings → Redirect URIs)\n"
         )
-        return 1
+        # SpotifyOAuth with open_browser=True starts a local server on 127.0.0.1
+        # that captures the redirect automatically — no copy-paste needed.
+        auth = SpotifyOAuth(
+            client_id=config["client_id"],
+            client_secret=config["client_secret"],
+            redirect_uri=REDIRECT_URI,
+            scope=SCOPE,
+            cache_path=CACHE_FILE,
+            open_browser=True,
+        )
+        print("Opening Spotify login in your browser…")
+        # Calling current_user() triggers the full interactive auth flow
+        tmp_sp = spotipy.Spotify(auth_manager=auth)
+        tmp_sp.current_user()
+        print("Login successful.\n")
 
-    # ── 5. Score and select ──────────────────────────────────────────────────
-    LOG.info("\n[5/6] Scoring candidates and selecting final tracks...")
-    final_tracks = score_and_select(sp, all_candidates, profiles, quotas, args.size)
-    LOG.info(f"Final selection: {len(final_tracks)} tracks")
+    # ── Run pipeline, printing messages to stdout ───────────────────────────
+    settings = {"data_dir": args.data_dir, "size": args.size, "clusters": args.clusters}
+    msg_q: queue.Queue = queue.Queue()
+    stop_ev = threading.Event()
 
-    # ── 6. Create playlist ───────────────────────────────────────────────────
-    LOG.info("\n[6/6] Creating Spotify playlist...")
-    playlist_name = f"All Stations Mix — {datetime.now().strftime('%Y-%m-%d')}"
-    url = create_playlist(sp, user_id, final_tracks, playlist_name)
+    t = threading.Thread(target=run_pipeline, args=(settings, msg_q, stop_ev), daemon=True)
+    t.start()
 
-    print_summary(final_tracks, profiles, url)
+    while t.is_alive() or not msg_q.empty():
+        try:
+            msg = msg_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+
+        kind = msg[0]
+        if kind == "log":
+            if msg[1] != "DEBUG" or args.verbose:
+                print(msg[2])
+        elif kind == "step":
+            print(f"\n[{msg[1]}/6] {msg[3]}")
+        elif kind == "track":
+            print(f"  ♫  {msg[1]} — {msg[2]}")
+        elif kind == "done":
+            _, url, summary = msg
+            print(f"\n{'='*62}")
+            print(f"  Playlist: {url}")
+            print(f"  Tracks:   {summary['total']}")
+            for mood, count in summary["mood_counts"].items():
+                print(f"    {mood}: {count}")
+            print(f"  Top artists: {', '.join(summary['top_artists'])}")
+            print(f"{'='*62}\n")
+            return 0
+        elif kind == "error":
+            print(f"\nERROR: {msg[1]}", file=sys.stderr)
+            return 1
+
     return 0
 
 
