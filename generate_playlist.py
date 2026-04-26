@@ -181,32 +181,48 @@ def load_liked_tracks(
 
 def load_streaming_history(
     data_dir: Path, zf: Optional[zipfile.ZipFile] = None
-) -> Tuple[Dict[str, float], Dict[str, int]]:
+) -> Tuple[Dict[str, float], Dict[str, int], Dict[str, str]]:
     """
-    Read all StreamingHistory_music_*.json files from a directory or zip archive.
-    Handles both old (artistName/trackName/msPlayed) and new (master_metadata_*/ms_played)
-    Spotify export formats.
+    Read all streaming history JSON files from a directory or zip archive.
+
+    Supports three Spotify export variants:
+      • Standard account export:  StreamingHistory_music_*.json
+      • Extended streaming history: Streaming_History_Audio_*.json
+        (includes spotify_track_uri — lets us skip the Search API entirely)
+
+    Video/podcast files (Streaming_History_Video_*.json) are intentionally excluded.
 
     Returns:
-        play_scores  – log-scaled listening score per track key
-        play_counts  – raw play count per track key (for heavy-play detection)
+        play_scores – log-scaled listening score per 'artist||track' key
+        play_counts – raw play count per key (for heavy-play detection)
+        track_uris  – spotify:track: URI per key, when available from the export
     """
-    # Collect the list of matching filenames from whichever source we have
+    def _is_history_file(name: str) -> bool:
+        return (
+            fnmatch.fnmatch(name, "StreamingHistory_music_*.json")
+            or fnmatch.fnmatch(name, "Streaming_History_Audio_*.json")
+        )
+
     if zf is not None:
         history_names = sorted(
-            os.path.basename(e)
-            for e in zf.namelist()
-            if fnmatch.fnmatch(os.path.basename(e), "StreamingHistory_music_*.json")
+            os.path.basename(e) for e in zf.namelist() if _is_history_file(os.path.basename(e))
         )
     else:
-        history_names = sorted(p.name for p in data_dir.glob("StreamingHistory_music_*.json"))
+        history_names = sorted(
+            p.name
+            for p in data_dir.iterdir()
+            if p.is_file() and _is_history_file(p.name)
+        )
 
     if not history_names:
-        LOG.warning("No StreamingHistory_music_*.json files found")
-        return {}, {}
+        LOG.warning("No streaming history JSON files found in the export")
+        return {}, {}, {}
+
+    LOG.info(f"Found {len(history_names)} streaming history file(s)")
 
     play_ms: Dict[str, float] = defaultdict(float)
     play_counts: Dict[str, int] = defaultdict(int)
+    track_uris: Dict[str, str] = {}
 
     for name in history_names:
         LOG.debug(f"Loading {name}")
@@ -214,8 +230,8 @@ def load_streaming_history(
             entries = json.load(f)
 
         for entry in entries:
-            # Old format uses "artistName"/"trackName"/"msPlayed"
-            # New extended format uses master_metadata_* / "ms_played"
+            # Standard export:  artistName / trackName / msPlayed
+            # Extended export:  master_metadata_album_artist_name / master_metadata_track_name / ms_played
             artist = (
                 entry.get("artistName")
                 or entry.get("master_metadata_album_artist_name")
@@ -229,34 +245,44 @@ def load_streaming_history(
             ms = entry.get("msPlayed") or entry.get("ms_played") or 0
 
             if not artist or not track or ms < 30_000:
-                # Skip rows with missing data or tracks played for less than 30 s
-                # (short plays are almost certainly skips, not genuine listens)
+                # Skip missing data and tracks played < 30 s (almost certainly skips)
                 continue
 
             key = f"{artist.lower()}||{track.lower()}"
             play_ms[key] += ms
             play_counts[key] += 1
 
+            # Extended export includes the track URI — grab it once per key
+            if key not in track_uris:
+                uri = (entry.get("spotify_track_uri") or "").strip()
+                if uri.startswith("spotify:track:"):
+                    track_uris[key] = uri
+
     play_scores = {k: math.log1p(v / 60_000) for k, v in play_ms.items()}
     LOG.info(
         f"Streaming history: {len(play_scores)} unique tracks, "
-        f"{sum(play_counts.values())} total qualifying plays"
+        f"{sum(play_counts.values())} qualifying plays, "
+        f"{len(track_uris)} with direct Spotify URIs"
     )
-    return play_scores, play_counts
+    return play_scores, play_counts, track_uris
 
 
 def build_weighted_tracks(
     liked: Dict[str, dict],
     play_scores: Dict[str, float],
     play_counts: Dict[str, int],
+    track_uris: Dict[str, str],
     top_n: int = 500,
 ) -> Tuple[List[dict], Set[str]]:
     """
     Merge liked library and play history.
     final_weight = liked_base (3.0 if liked, else 0) + log_play_score
 
+    track_uris carries URIs harvested directly from Extended Streaming History
+    entries; these let resolve_tracks_to_ids skip the Search API for those tracks.
+
     Returns:
-        tracks         – top_n entries sorted descending by weight
+        tracks          – top_n entries sorted descending by weight
         heavy_play_keys – keys of tracks played >10 times (excluded from recs)
     """
     all_keys = set(liked) | set(play_scores)
@@ -269,12 +295,14 @@ def build_weighted_tracks(
         parts = key.split("||", 1)
         artist = base.get("artist") or (parts[0].title() if parts else "")
         trk = base.get("track") or (parts[1].title() if len(parts) > 1 else "")
+        # Prefer the URI from the liked library; fall back to one from streaming history
+        uri = base.get("uri") or track_uris.get(key, "")
         tracks.append(
             {
                 "key": key,
                 "artist": artist,
                 "track": trk,
-                "uri": base.get("uri", ""),
+                "uri": uri,
                 "weight": base.get("weight", 0.0) + score,
                 "is_liked": key in liked,
                 "play_count": play_counts.get(key, 0),
@@ -863,12 +891,14 @@ def main() -> int:
 
     try:
         liked = load_liked_tracks(data_dir, zf)
-        play_scores, play_counts = load_streaming_history(data_dir, zf)
+        play_scores, play_counts, track_uris = load_streaming_history(data_dir, zf)
     finally:
         if zf is not None:
             zf.close()
 
-    tracks, heavy_keys = build_weighted_tracks(liked, play_scores, play_counts, top_n=500)
+    tracks, heavy_keys = build_weighted_tracks(
+        liked, play_scores, play_counts, track_uris, top_n=500
+    )
 
     if not tracks:
         LOG.error("No tracks found. Make sure --data-dir points to your Spotify data export.")
