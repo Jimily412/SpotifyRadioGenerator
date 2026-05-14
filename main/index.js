@@ -32,13 +32,7 @@ function createWindow() {
     title: 'TasteEngine',
   });
 
-  const isDev = !app.isPackaged;
-  if (isDev) {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
-    // mainWindow.webContents.openDevTools();
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/dist/index.html'));
-  }
+  mainWindow.loadFile(path.join(__dirname, '../renderer/dist/index.html'));
 
   mainWindow.on('closed', () => { mainWindow = null; });
 }
