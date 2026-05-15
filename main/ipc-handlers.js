@@ -147,6 +147,7 @@ function registerIpcHandlers(mainWindow) {
       logFn('Analysis complete!');
       return {
         ok: true,
+        audioFeaturesAvailable,
         fingerprint,
         clusters: clusters.map(c => ({
           id: c.id,

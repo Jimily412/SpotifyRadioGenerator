@@ -93,32 +93,60 @@ export default function AnalyzePage() {
         <>
           <div className="card">
             <h2>Your Music Fingerprint</h2>
-            <div className="fingerprint-panel">
-              <div>
-                <div className="taste-score">{analysisResult.fingerprint?.tasteScore}</div>
-                <div className="taste-score-label">Taste Score</div>
-                <div style={{ fontSize: 11, color: '#555', marginTop: 4, maxWidth: 200 }}>
-                  Energy×30 + Dance×25 + Valence×20 + Acoustic×15 + Instrumental×10
+
+            {!analysisResult.audioFeaturesAvailable ? (
+              <>
+                <div className="notice notice-warn" style={{ marginBottom: 16 }}>
+                  Spotify's audio features endpoint (energy, danceability, etc.) is restricted for this app —
+                  this is a Spotify API policy for newer apps. Playlists still generate using your listening
+                  history. The radar chart requires a Spotify app with extended API access.
                 </div>
-              </div>
-              <RadarChart avg={analysisResult.fingerprint?.avg || {}} std={analysisResult.fingerprint?.std || {}} />
-              <div style={{ flex: 1 }}>
-                <div className="feature-list">
-                  {FEATURE_NAMES.map(f => {
-                    const val = analysisResult.fingerprint?.avg?.[f] || 0;
-                    return (
-                      <div key={f} className="feature-row">
-                        <span className="feature-name" style={{ textTransform: 'capitalize' }}>{f}</span>
-                        <div className="feature-bar-bg">
-                          <div className="feature-bar-fill" style={{ width: `${val * 100}%` }} />
+                <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#888', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Tracks Analysed</div>
+                    <div className="taste-score">{analysisResult.clusters?.reduce((s, c) => s + c.trackCount, 0)}</div>
+                    <div className="taste-score-label">from your history</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#888', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Top Artists</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {[...new Set(
+                        (analysisResult.clusters?.[0]?.topTracks || []).map(t => t.artistName)
+                      )].slice(0, 5).map((a, i) => (
+                        <div key={i} style={{ fontSize: 13, color: '#ccc' }}>{a}</div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="fingerprint-panel">
+                <div>
+                  <div className="taste-score">{analysisResult.fingerprint?.tasteScore}</div>
+                  <div className="taste-score-label">Taste Score</div>
+                  <div style={{ fontSize: 11, color: '#555', marginTop: 4, maxWidth: 200 }}>
+                    Energy×30 + Dance×25 + Valence×20 + Acoustic×15 + Instrumental×10
+                  </div>
+                </div>
+                <RadarChart avg={analysisResult.fingerprint?.avg || {}} std={analysisResult.fingerprint?.std || {}} />
+                <div style={{ flex: 1 }}>
+                  <div className="feature-list">
+                    {FEATURE_NAMES.map(f => {
+                      const val = analysisResult.fingerprint?.avg?.[f] || 0;
+                      return (
+                        <div key={f} className="feature-row">
+                          <span className="feature-name" style={{ textTransform: 'capitalize' }}>{f}</span>
+                          <div className="feature-bar-bg">
+                            <div className="feature-bar-fill" style={{ width: `${val * 100}%` }} />
+                          </div>
+                          <span className="feature-val">{val.toFixed(2)}</span>
                         </div>
-                        <span className="feature-val">{val.toFixed(2)}</span>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {analysisResult.liveDataSummary && (
               <div style={{ marginTop: 16, fontSize: 12, color: '#666' }}>
