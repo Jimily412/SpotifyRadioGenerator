@@ -23,19 +23,12 @@ function createClient(accessToken) {
 class SessionBudget {
   constructor() {
     this.limits = {
-      search: 100,
-      audioFeatures: 10,
-      recommendations: 30,
-      playlistWrite: 5,
-      topTracks: 6,
-      recentlyPlayed: 1,
-      libraryRead: 3,
-      artistLookup: 6,
+      search: 100, audioFeatures: 10, playlistWrite: 5,
+      topTracks: 6, recentlyPlayed: 1, libraryRead: 3, artistLookup: 6,
     };
     this.used = {
-      search: 0, audioFeatures: 0, recommendations: 0,
-      playlistWrite: 0, topTracks: 0, recentlyPlayed: 0, libraryRead: 0,
-      artistLookup: 0,
+      search: 0, audioFeatures: 0, playlistWrite: 0,
+      topTracks: 0, recentlyPlayed: 0, libraryRead: 0, artistLookup: 0,
     };
   }
 

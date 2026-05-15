@@ -9,113 +9,67 @@ function getCredentials() {
 
 async function lfmGet(method, extra = {}) {
   const creds = getCredentials();
-  const params = {
-    method,
-    user: creds.username,
-    api_key: creds.apiKey,
-    format: 'json',
-    ...extra,
-  };
-  const resp = await axios.get(BASE, { params, timeout: 15000 });
-  if (resp.data.error) {
-    throw new Error(`Last.fm API error ${resp.data.error}: ${resp.data.message}`);
-  }
+  const resp = await axios.get(BASE, {
+    params: { method, user: creds.username, api_key: creds.apiKey, format: 'json', ...extra },
+    timeout: 15000,
+  });
+  if (resp.data.error) throw new Error(`Last.fm ${resp.data.error}: ${resp.data.message}`);
   return resp.data;
 }
 
+const TOP_PERIODS = [
+  { period: '1month',  weight: 3, label: '1 month' },
+  { period: '3month',  weight: 3, label: '3 months' },
+  { period: '12month', weight: 4, label: '12 months' },
+  { period: 'overall', weight: 3, label: 'all time', limit: 200 },
+];
+
 async function fetchLastfmData(logFn) {
   const creds = getCredentials();
-  if (!creds || !creds.apiKey || !creds.username) return { tracks: [], errors: ['Last.fm not configured'] };
+  if (!creds?.apiKey || !creds?.username) return { tracks: [], errors: ['Last.fm not configured'] };
 
-  logFn && logFn(`Last.fm: checking account "${creds.username}"...`);
+  logFn?.(`Last.fm: checking account "${creds.username}"...`);
 
   const results = [];
   const errors = [];
+  const THIRTY_DAYS_AGO = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
   try {
     const data = await lfmGet('user.getRecentTracks', { limit: 200 });
-    const tracks = data.recenttracks?.track || [];
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    let recentCount = 0;
-    for (const t of tracks) {
-      if (t['@attr']?.nowplaying) continue;
-      const ts = t.date?.uts ? parseInt(t.date.uts, 10) * 1000 : 0;
-      if (ts >= thirtyDaysAgo) {
-        results.push({ artistName: t.artist['#text'], trackName: t.name, weight: 1 });
-        recentCount++;
-      }
-    }
-    logFn && logFn(`Last.fm recent tracks (last 30 days): ${recentCount} of ${tracks.length} total fetched`);
+    const recent = (data.recenttracks?.track || []).filter(t =>
+      !t['@attr']?.nowplaying &&
+      (t.date?.uts ? parseInt(t.date.uts, 10) * 1000 : 0) >= THIRTY_DAYS_AGO
+    );
+    results.push(...recent.map(t => ({ artistName: t.artist['#text'], trackName: t.name, weight: 1 })));
+    logFn?.(`Last.fm recent (30 days): ${recent.length}`);
   } catch (err) {
     errors.push(err.message);
-    logFn && logFn(`Last.fm recent tracks failed: ${err.message}`);
+    logFn?.(`Last.fm recent tracks failed: ${err.message}`);
   }
 
-  const topMonthTracks = [];
-  try {
-    const data = await lfmGet('user.getTopTracks', { period: '1month', limit: 100 });
-    const tracks = data.toptracks?.track || [];
-    for (const t of tracks) {
-      topMonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
+  for (const { period, weight, label, limit = 100 } of TOP_PERIODS) {
+    try {
+      const data = await lfmGet('user.getTopTracks', { period, limit });
+      const tracks = data.toptracks?.track || [];
+      results.push(...tracks.map(t => ({ artistName: t.artist.name, trackName: t.name, weight })));
+      logFn?.(`Last.fm top tracks (${label}): ${tracks.length}`);
+    } catch (err) {
+      errors.push(err.message);
+      logFn?.(`Last.fm top tracks (${label}) failed: ${err.message}`);
     }
-    logFn && logFn(`Last.fm top tracks (1 month): ${topMonthTracks.length}`);
-    if (topMonthTracks.length === 0) logFn('Last.fm: no top tracks for 1 month — account may be new or username may be incorrect');
-  } catch (err) {
-    errors.push(err.message);
-    logFn && logFn(`Last.fm top tracks (1 month) failed: ${err.message}`);
   }
 
-  const top3MonthTracks = [];
-  try {
-    const data = await lfmGet('user.getTopTracks', { period: '3month', limit: 100 });
-    const tracks = data.toptracks?.track || [];
-    for (const t of tracks) {
-      top3MonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
-    }
-    logFn && logFn(`Last.fm top tracks (3 month): ${top3MonthTracks.length}`);
-  } catch (err) {
-    errors.push(err.message);
-    logFn && logFn(`Last.fm top tracks (3 month) failed: ${err.message}`);
-  }
-
-  const top12MonthTracks = [];
-  try {
-    const data = await lfmGet('user.getTopTracks', { period: '12month', limit: 100 });
-    const tracks = data.toptracks?.track || [];
-    for (const t of tracks) {
-      top12MonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 4 });
-    }
-    logFn && logFn(`Last.fm top tracks (12 month): ${top12MonthTracks.length}`);
-  } catch (err) {
-    errors.push(err.message);
-    logFn && logFn(`Last.fm top tracks (12 month) failed: ${err.message}`);
-  }
-
-  const topAllTimeTracks = [];
-  try {
-    const data = await lfmGet('user.getTopTracks', { period: 'overall', limit: 200 });
-    const tracks = data.toptracks?.track || [];
-    for (const t of tracks) {
-      topAllTimeTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
-    }
-    logFn && logFn(`Last.fm top tracks (all time): ${topAllTimeTracks.length}`);
-  } catch (err) {
-    errors.push(err.message);
-    logFn && logFn(`Last.fm top tracks (all time) failed: ${err.message}`);
-  }
-
-  return {
-    tracks: [...results, ...topMonthTracks, ...top3MonthTracks, ...top12MonthTracks, ...topAllTimeTracks],
-    errors,
-  };
+  return { tracks: results, errors };
 }
 
 async function getSimilarArtists(artistName, limit = 8) {
   const creds = getCredentials();
-  if (!creds || !creds.apiKey) return [];
+  if (!creds?.apiKey) return [];
   try {
-    const params = { method: 'artist.getSimilar', artist: artistName, api_key: creds.apiKey, format: 'json', limit, autocorrect: 1 };
-    const resp = await axios.get(BASE, { params, timeout: 10000 });
+    const resp = await axios.get(BASE, {
+      params: { method: 'artist.getSimilar', artist: artistName, api_key: creds.apiKey, format: 'json', limit, autocorrect: 1 },
+      timeout: 10000,
+    });
     return (resp.data?.similarartists?.artist || []).map(a => a.name);
   } catch {
     return [];

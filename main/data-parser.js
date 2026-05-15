@@ -1,82 +1,55 @@
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 
-// Recursively find all files matching a predicate under a directory
 function findFiles(dir, predicate, results = []) {
   let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-  catch (_) { return results; }
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      findFiles(full, predicate, results);
-    } else if (entry.isFile() && predicate(entry.name)) {
-      results.push(full);
-    }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return results; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) findFiles(full, predicate, results);
+    else if (e.isFile() && predicate(e.name)) results.push(full);
   }
   return results;
 }
 
 function isHistoryFile(name) {
-  // Standard account data export: StreamingHistory_music_0.json
-  // Extended streaming history (older): endsong_0.json
-  // Extended streaming history (newer): Streaming_History_Audio_2023-2024_8.json
   return /^StreamingHistory_music_\d+\.json$/i.test(name) ||
          /^endsong_\d+\.json$/i.test(name) ||
          /^Streaming_History_Audio_.*\.json$/i.test(name);
 }
 
-// Secondary: content-based detection for files that don't match the filename pattern.
-// Spotify may change export filenames without notice.
-function looksLikeHistoryContent(entries) {
-  if (!Array.isArray(entries) || entries.length === 0) return false;
-  const sample = entries[0];
-  // Must have a play duration field and at least one track name field
-  const hasMs = 'msPlayed' in sample || 'ms_played' in sample;
-  const hasTrack = 'trackName' in sample || 'master_metadata_track_name' in sample;
-  return hasMs && hasTrack;
+function isLibraryFile(name) { return name === 'YourLibrary.json'; }
+
+function looksLikeHistory(entries) {
+  if (!Array.isArray(entries) || !entries[0]) return false;
+  const s = entries[0];
+  return ('msPlayed' in s || 'ms_played' in s) && ('trackName' in s || 'master_metadata_track_name' in s);
 }
 
-function isLibraryFile(name) {
-  return name === 'YourLibrary.json';
-}
-
-// Parse a streaming history JSON array (handles both export formats)
 function parseHistoryEntries(entries, weightMap, dateMap) {
-  for (const entry of entries) {
-    const artist = (entry.artistName || entry.master_metadata_album_artist_name || '').trim();
-    const track  = (entry.trackName  || entry.master_metadata_track_name        || '').trim();
-    const ms     = entry.msPlayed    || entry.ms_played    || 0;
-    const ts     = entry.ts          || entry.endTime;
-
-    if (!artist || !track) continue;
-    if (ms < 30000) continue;
-
-    const rawKey = `${artist}|${track}`;
-
-    if (!weightMap[rawKey]) {
-      weightMap[rawKey] = { artistName: artist, trackName: track, plays: 0 };
-      dateMap[rawKey] = [];
-    }
-    weightMap[rawKey].plays++;
-    if (ts) dateMap[rawKey].push(new Date(ts).getTime());
+  for (const e of entries) {
+    const artist = (e.artistName || e.master_metadata_album_artist_name || '').trim();
+    const track  = (e.trackName  || e.master_metadata_track_name        || '').trim();
+    const ms     = e.msPlayed    || e.ms_played || 0;
+    if (!artist || !track || ms < 30000) continue;
+    const key = `${artist}|${track}`;
+    if (!weightMap[key]) { weightMap[key] = { artistName: artist, trackName: track, plays: 0 }; dateMap[key] = []; }
+    weightMap[key].plays++;
+    const ts = e.ts || e.endTime;
+    if (ts) dateMap[key].push(new Date(ts).getTime());
   }
 }
 
 function parseLibraryEntries(lib, weightMap, dateMap) {
-  const liked = lib?.tracks || [];
   let count = 0;
-  for (const item of liked) {
+  for (const item of (lib?.tracks || [])) {
     const artist = (item.artist || '').trim();
     const track  = (item.track  || '').trim();
     if (!artist || !track) continue;
-    const rawKey = `${artist}|${track}`;
-    if (!weightMap[rawKey]) {
-      weightMap[rawKey] = { artistName: artist, trackName: track, plays: 0 };
-      dateMap[rawKey] = [];
-    }
-    weightMap[rawKey].liked = true;
+    const key = `${artist}|${track}`;
+    if (!weightMap[key]) { weightMap[key] = { artistName: artist, trackName: track, plays: 0 }; dateMap[key] = []; }
+    weightMap[key].liked = true;
     count++;
   }
   return count;
@@ -84,119 +57,66 @@ function parseLibraryEntries(lib, weightMap, dateMap) {
 
 function buildResults(weightMap, dateMap, historyFileCount, likedCount, hasLibrary) {
   const now = Date.now();
-  const tracks = [];
-
-  for (const [key, entry] of Object.entries(weightMap)) {
-    let weight = entry.plays;
-
+  const tracks = Object.entries(weightMap).map(([key, e]) => {
     const timestamps = dateMap[key] || [];
+    let weight = e.plays;
     if (timestamps.length > 0) {
-      const avgTs = timestamps.reduce((a, b) => a + b, 0) / timestamps.length;
-      const ageDays = (now - avgTs) / 86400000;
-      const mult = ageDays <= 30 ? 1.1 : ageDays <= 90 ? 1.05 : ageDays <= 365 ? 1.0 : 0.9;
-      weight *= mult;
+      const ageDays = (now - timestamps.reduce((a, b) => a + b, 0) / timestamps.length) / 86400000;
+      weight *= ageDays <= 30 ? 1.1 : ageDays <= 90 ? 1.05 : ageDays <= 365 ? 1.0 : 0.9;
     }
-
-    if (entry.liked) weight += 5;
-    weight = Math.min(50, weight);
-    if (weight < 0.01) continue;
-
-    tracks.push({
-      artistName: entry.artistName,
-      trackName:  entry.trackName,
-      weight,
-      plays: entry.plays,
-      liked: !!entry.liked,
-    });
-  }
-
-  tracks.sort((a, b) => b.weight - a.weight);
+    if (e.liked) weight += 5;
+    return { artistName: e.artistName, trackName: e.trackName, weight: Math.min(50, weight), plays: e.plays, liked: !!e.liked };
+  }).filter(t => t.weight >= 0.01).sort((a, b) => b.weight - a.weight);
 
   let minDate = null, maxDate = null;
-  for (const dts of Object.values(dateMap)) {
-    for (const ts of dts) {
-      if (!minDate || ts < minDate) minDate = ts;
-      if (!maxDate || ts > maxDate) maxDate = ts;
-    }
+  for (const dts of Object.values(dateMap)) for (const ts of dts) {
+    if (!minDate || ts < minDate) minDate = ts;
+    if (!maxDate || ts > maxDate) maxDate = ts;
   }
-
-  const mode = hasLibrary && historyFileCount > 0 ? 'Full Export'
-    : hasLibrary ? 'Library Only'
-    : 'Streaming History Only';
 
   return {
     tracks,
-    mode,
+    mode: hasLibrary && historyFileCount > 0 ? 'Full Export' : hasLibrary ? 'Library Only' : 'Streaming History Only',
     trackCount: tracks.length,
     likedCount,
     historyFiles: historyFileCount,
-    dateRange: minDate
-      ? { from: new Date(minDate).toISOString(), to: new Date(maxDate).toISOString() }
-      : null,
-    warning: tracks.length < 50
-      ? `Only ${tracks.length} weighted tracks found after filtering. Results may be limited.`
-      : null,
+    dateRange: minDate ? { from: new Date(minDate).toISOString(), to: new Date(maxDate).toISOString() } : null,
+    warning: tracks.length < 50 ? `Only ${tracks.length} tracks found — results may be limited.` : null,
   };
 }
 
-// ── Main entry: accepts a folder path OR a .zip file path ──────────────────
-
 function parseExport(inputPath) {
   const stat = fs.statSync(inputPath);
-
-  if (stat.isFile() && inputPath.toLowerCase().endsWith('.zip')) {
-    return parseZip(inputPath);
-  }
-
-  if (stat.isDirectory()) {
-    return parseExportFolder(inputPath);
-  }
-
+  if (stat.isFile() && inputPath.toLowerCase().endsWith('.zip')) return parseZip(inputPath);
+  if (stat.isDirectory()) return parseExportFolder(inputPath);
   return { error: 'Please select a folder or a .zip file.', tracks: [] };
 }
 
 function parseExportFolder(folderPath) {
   const historyPaths = findFiles(folderPath, isHistoryFile);
   const libraryPaths = findFiles(folderPath, isLibraryFile);
+  const allJson      = findFiles(folderPath, n => n.toLowerCase().endsWith('.json'));
 
-  if (historyPaths.length === 0 && libraryPaths.length === 0) {
-    return {
-      error:
-        'No Spotify export files found anywhere inside that folder. ' +
-        'Expected StreamingHistory_music_*.json, endsong_*.json, or YourLibrary.json.',
-      tracks: [],
-    };
+  const weightMap = {}, dateMap = {};
+  const knownPaths = new Set([...historyPaths, ...libraryPaths]);
+
+  for (const p of historyPaths) {
+    try { parseHistoryEntries(JSON.parse(fs.readFileSync(p, 'utf-8')), weightMap, dateMap); } catch {}
   }
-
-  const weightMap = {};
-  const dateMap   = {};
-
-  // Also scan all JSON files in the folder using content detection as a fallback
-  const allJsonPaths = findFiles(folderPath, n => n.toLowerCase().endsWith('.json'));
-  const extraHistoryPaths = allJsonPaths.filter(p => !historyPaths.includes(p) && !libraryPaths.includes(p));
-
-  for (const filePath of historyPaths) {
+  for (const p of allJson.filter(p => !knownPaths.has(p))) {
     try {
-      const entries = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      parseHistoryEntries(entries, weightMap, dateMap);
-    } catch (_) {}
-  }
-
-  for (const filePath of extraHistoryPaths) {
-    try {
-      const entries = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      if (looksLikeHistoryContent(entries)) {
-        parseHistoryEntries(entries, weightMap, dateMap);
-      }
-    } catch (_) {}
+      const entries = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      if (looksLikeHistory(entries)) parseHistoryEntries(entries, weightMap, dateMap);
+    } catch {}
   }
 
   let likedCount = 0;
-  if (libraryPaths.length > 0) {
-    try {
-      const lib = JSON.parse(fs.readFileSync(libraryPaths[0], 'utf-8'));
-      likedCount = parseLibraryEntries(lib, weightMap, dateMap);
-    } catch (_) {}
+  if (libraryPaths[0]) {
+    try { likedCount = parseLibraryEntries(JSON.parse(fs.readFileSync(libraryPaths[0], 'utf-8')), weightMap, dateMap); } catch {}
+  }
+
+  if (historyPaths.length === 0 && likedCount === 0) {
+    return { error: 'No Spotify export files found. Expected StreamingHistory_music_*.json, endsong_*.json, or YourLibrary.json.', tracks: [] };
   }
 
   return buildResults(weightMap, dateMap, historyPaths.length, likedCount, libraryPaths.length > 0);
@@ -204,42 +124,36 @@ function parseExportFolder(folderPath) {
 
 function parseZip(zipPath) {
   let zip;
-  try { zip = new AdmZip(zipPath); }
-  catch (e) { return { error: `Could not open ZIP file: ${e.message}`, tracks: [] }; }
+  try { zip = new AdmZip(zipPath); } catch (e) { return { error: `Could not open ZIP: ${e.message}`, tracks: [] }; }
 
-  const entries = zip.getEntries();
-  const weightMap = {};
-  const dateMap   = {};
-  let historyCount = 0;
-  let likedCount   = 0;
-  let hasLibrary   = false;
+  const weightMap = {}, dateMap = {};
+  let historyCount = 0, likedCount = 0, hasLibrary = false;
+  const unclassified = [];
 
-  for (const entry of entries) {
+  for (const entry of zip.getEntries()) {
     if (entry.isDirectory) continue;
     const name = path.basename(entry.entryName);
-
-    if (isHistoryFile(name)) {
-      try {
-        const data = JSON.parse(entry.getData().toString('utf-8'));
-        parseHistoryEntries(data, weightMap, dateMap);
+    try {
+      const parsed = JSON.parse(entry.getData().toString('utf-8'));
+      if (isHistoryFile(name)) {
+        parseHistoryEntries(parsed, weightMap, dateMap);
         historyCount++;
-      } catch (_) {}
-    } else if (isLibraryFile(name)) {
-      try {
-        const lib = JSON.parse(entry.getData().toString('utf-8'));
-        likedCount = parseLibraryEntries(lib, weightMap, dateMap);
+      } else if (isLibraryFile(name)) {
+        likedCount = parseLibraryEntries(parsed, weightMap, dateMap);
         hasLibrary = true;
-      } catch (_) {}
-    }
+      } else if (name.endsWith('.json')) {
+        unclassified.push(parsed);
+      }
+    } catch {}
+  }
+
+  // Content-based fallback for unclassified JSON entries
+  for (const parsed of unclassified) {
+    if (looksLikeHistory(parsed)) { parseHistoryEntries(parsed, weightMap, dateMap); historyCount++; }
   }
 
   if (historyCount === 0 && !hasLibrary) {
-    return {
-      error:
-        'No Spotify export files found inside the ZIP. ' +
-        'Expected StreamingHistory_music_*.json, endsong_*.json, or YourLibrary.json.',
-      tracks: [],
-    };
+    return { error: 'No Spotify export files found inside the ZIP.', tracks: [] };
   }
 
   return buildResults(weightMap, dateMap, historyCount, likedCount, hasLibrary);
