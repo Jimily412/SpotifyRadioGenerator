@@ -41,7 +41,7 @@ async function fetchLastfmData(logFn) {
       if (t['@attr']?.nowplaying) continue;
       const ts = t.date?.uts ? parseInt(t.date.uts, 10) * 1000 : 0;
       if (ts >= thirtyDaysAgo) {
-        results.push({ artistName: t.artist['#text'], trackName: t.name, weight: 2 });
+        results.push({ artistName: t.artist['#text'], trackName: t.name, weight: 1 });
         recentCount++;
       }
     }
@@ -56,7 +56,7 @@ async function fetchLastfmData(logFn) {
     const data = await lfmGet('user.getTopTracks', { period: '1month', limit: 100 });
     const tracks = data.toptracks?.track || [];
     for (const t of tracks) {
-      topMonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 6 });
+      topMonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
     }
     logFn && logFn(`Last.fm top tracks (1 month): ${topMonthTracks.length}`);
     if (topMonthTracks.length === 0) logFn('Last.fm: no top tracks for 1 month — account may be new or username may be incorrect');
@@ -70,7 +70,7 @@ async function fetchLastfmData(logFn) {
     const data = await lfmGet('user.getTopTracks', { period: '3month', limit: 100 });
     const tracks = data.toptracks?.track || [];
     for (const t of tracks) {
-      top3MonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 4 });
+      top3MonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
     }
     logFn && logFn(`Last.fm top tracks (3 month): ${top3MonthTracks.length}`);
   } catch (err) {
@@ -78,8 +78,34 @@ async function fetchLastfmData(logFn) {
     logFn && logFn(`Last.fm top tracks (3 month) failed: ${err.message}`);
   }
 
+  const top12MonthTracks = [];
+  try {
+    const data = await lfmGet('user.getTopTracks', { period: '12month', limit: 100 });
+    const tracks = data.toptracks?.track || [];
+    for (const t of tracks) {
+      top12MonthTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 4 });
+    }
+    logFn && logFn(`Last.fm top tracks (12 month): ${top12MonthTracks.length}`);
+  } catch (err) {
+    errors.push(err.message);
+    logFn && logFn(`Last.fm top tracks (12 month) failed: ${err.message}`);
+  }
+
+  const topAllTimeTracks = [];
+  try {
+    const data = await lfmGet('user.getTopTracks', { period: 'overall', limit: 200 });
+    const tracks = data.toptracks?.track || [];
+    for (const t of tracks) {
+      topAllTimeTracks.push({ artistName: t.artist.name, trackName: t.name, weight: 3 });
+    }
+    logFn && logFn(`Last.fm top tracks (all time): ${topAllTimeTracks.length}`);
+  } catch (err) {
+    errors.push(err.message);
+    logFn && logFn(`Last.fm top tracks (all time) failed: ${err.message}`);
+  }
+
   return {
-    tracks: [...results, ...topMonthTracks, ...top3MonthTracks],
+    tracks: [...results, ...topMonthTracks, ...top3MonthTracks, ...top12MonthTracks, ...topAllTimeTracks],
     errors,
   };
 }

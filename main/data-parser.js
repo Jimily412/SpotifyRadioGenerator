@@ -82,7 +82,7 @@ function buildResults(weightMap, dateMap, historyFileCount, likedCount, hasLibra
     if (timestamps.length > 0) {
       const avgTs = timestamps.reduce((a, b) => a + b, 0) / timestamps.length;
       const ageDays = (now - avgTs) / 86400000;
-      const mult = ageDays <= 30 ? 1.5 : ageDays <= 90 ? 1.2 : ageDays <= 365 ? 1.0 : 0.7;
+      const mult = ageDays <= 30 ? 1.1 : ageDays <= 90 ? 1.05 : ageDays <= 365 ? 1.0 : 0.9;
       weight *= mult;
     }
 
