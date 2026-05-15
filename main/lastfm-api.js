@@ -110,4 +110,16 @@ async function fetchLastfmData(logFn) {
   };
 }
 
-module.exports = { fetchLastfmData };
+async function getSimilarArtists(artistName, limit = 8) {
+  const creds = getCredentials();
+  if (!creds || !creds.apiKey) return [];
+  try {
+    const params = { method: 'artist.getSimilar', artist: artistName, api_key: creds.apiKey, format: 'json', limit, autocorrect: 1 };
+    const resp = await axios.get(BASE, { params, timeout: 10000 });
+    return (resp.data?.similarartists?.artist || []).map(a => a.name);
+  } catch {
+    return [];
+  }
+}
+
+module.exports = { fetchLastfmData, getSimilarArtists };

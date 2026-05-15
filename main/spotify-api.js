@@ -286,53 +286,32 @@ function normalizeFeatures(f) {
   };
 }
 
-async function getRecommendations(seedIds, targetFeatures, minFeatures, maxFeatures, budget, logFn) {
-  const cacheKey = [...seedIds].sort().join('|');
-  const cached = cacheGet('recommendations', cacheKey);
-  if (cached) return cached;
-
-  if (!budget.canCall('recommendations')) return [];
-
+async function getTracksByArtistNames(artistNames, tracksPerArtist, budget, logFn) {
+  if (artistNames.length === 0) return [];
   const accessToken = await getValidAccessTokenOrRefresh();
   if (!accessToken) return [];
   const client = createClient(accessToken);
 
-  const params = {
-    seed_tracks: seedIds,
-    limit: 20,
-  };
+  const results = [];
+  const seenIds = new Set();
 
-  const featureNames = ['danceability', 'energy', 'loudness', 'speechiness', 'acousticness', 'instrumentalness', 'liveness', 'valence', 'tempo'];
-  for (const feat of featureNames) {
-    if (targetFeatures[feat] !== undefined) {
-      params[`target_${feat}`] = targetFeatures[feat];
-      if (minFeatures[feat] !== undefined) params[`min_${feat}`] = Math.max(0, minFeatures[feat]);
-      if (maxFeatures[feat] !== undefined) params[`max_${feat}`] = Math.min(1, maxFeatures[feat]);
+  for (const name of artistNames) {
+    if (!budget.canCall('search')) break;
+    const q = `artist:"${name.replace(/"/g, '')}"`;
+    try {
+      const data = await apiCallWithRetry(() => client.searchTracks(q, { limit: tracksPerArtist }));
+      budget.spend('search');
+      for (const t of (data.body.tracks?.items || [])) {
+        if (!seenIds.has(t.id)) {
+          seenIds.add(t.id);
+          results.push({ id: t.id, name: t.name, artists: t.artists.map(a => a.name), features: null });
+        }
+      }
+    } catch (err) {
+      logFn && logFn(`Artist search failed for "${name}": ${err.message}`);
     }
   }
-  // tempo needs special range
-  if (targetFeatures.tempo !== undefined) {
-    params.target_tempo = targetFeatures.tempo * 200;
-    if (minFeatures.tempo !== undefined) params.min_tempo = Math.max(0, minFeatures.tempo * 200);
-    if (maxFeatures.tempo !== undefined) params.max_tempo = maxFeatures.tempo * 200;
-  }
-
-  try {
-    const data = await apiCallWithRetry(() => client.getRecommendations(params));
-    budget.spend('recommendations');
-    const tracks = (data.body.tracks || []).map(t => ({
-      id: t.id,
-      name: t.name,
-      artists: t.artists.map(a => a.name),
-      features: t.audio_features ? normalizeFeatures(t.audio_features) : null,
-    }));
-    cacheSet('recommendations', cacheKey, tracks);
-    return tracks;
-  } catch (err) {
-    if (err.budgetExhausted) budget.used.recommendations = budget.limits.recommendations;
-    logFn && logFn(`Recommendation call failed: ${err.message}`);
-    return [];
-  }
+  return results;
 }
 
 async function createPlaylist(name, trackIds, budget, logFn) {
@@ -369,6 +348,6 @@ module.exports = {
   getLikedTracks,
   resolveTrackIds,
   getAudioFeatures,
-  getRecommendations,
+  getTracksByArtistNames,
   createPlaylist,
 };
