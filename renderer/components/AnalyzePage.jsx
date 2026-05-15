@@ -43,10 +43,10 @@ export default function AnalyzePage() {
       <div className="card">
         <div className="step-header">
           <div className="step-badge">1</div>
-          <h2>Load Spotify Export</h2>
+          <h3 style={{ margin: 0 }}>Load Spotify Export</h3>
         </div>
-        <p style={{ marginBottom: 16 }}>
-          Select your Spotify data export — either the unzipped folder or the original .zip file.
+        <p style={{ marginBottom: 20 }}>
+          Select your Spotify data export — either the unzipped folder or the original .zip.
           The app searches all subfolders automatically.
         </p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -63,8 +63,8 @@ export default function AnalyzePage() {
           </div>
         )}
         {parseResult && !parseResult.error && (
-          <div style={{ marginTop: 14 }}>
-            <div className="notice notice-info">
+          <div style={{ marginTop: 16 }}>
+            <div className="notice notice-success">
               <strong>{parseResult.mode}</strong> — {parseResult.trackCount.toLocaleString()} weighted tracks
               {parseResult.likedCount > 0 && ` · ${parseResult.likedCount.toLocaleString()} liked`}
               {parseResult.dateRange && (
@@ -82,9 +82,9 @@ export default function AnalyzePage() {
       <div className="card">
         <div className="step-header">
           <div className="step-badge">2</div>
-          <h2>Analyze My Taste</h2>
+          <h3 style={{ margin: 0 }}>Analyze My Taste</h3>
         </div>
-        <p style={{ marginBottom: 16 }}>
+        <p style={{ marginBottom: 20 }}>
           Fetches live Spotify + Last.fm data, resolves track IDs, and runs clustering on your full history.
         </p>
         <button
@@ -92,10 +92,10 @@ export default function AnalyzePage() {
           disabled={analyzing || (!parseResult && !folderPath)}
           onClick={runAnalysis}
         >
-          {analyzing ? 'Analyzing...' : '▶  Analyze My Taste'}
+          {analyzing ? 'Analyzing…' : '▶  Analyze My Taste'}
         </button>
         {(analyzing || logLines.length > 0) && (
-          <div style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 20 }}>
             <ProgressLog lines={logLines} />
           </div>
         )}
@@ -104,28 +104,28 @@ export default function AnalyzePage() {
       {analysisResult?.ok && (
         <>
           <div className="card">
-            <h2>Your Music Fingerprint</h2>
+            <h3 style={{ marginBottom: 20 }}>Your Music Fingerprint</h3>
             {!analysisResult.audioFeaturesAvailable ? (
               <>
-                <div className="notice notice-warn" style={{ marginBottom: 16 }}>
+                <div className="notice notice-warn" style={{ marginBottom: 20 }}>
                   Spotify's audio features endpoint is restricted for this app. Playlists still generate using your
                   listening history. The radar chart requires extended API access.
                 </div>
-                <div style={{ display: 'flex', gap: 36, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 40, flexWrap: 'wrap' }}>
                   <div>
-                    <div className="section-eyebrow">Tracks Analysed</div>
+                    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Tracks Analysed</div>
                     <div className="taste-score">
                       {analysisResult.clusters?.reduce((s, c) => s + c.trackCount, 0).toLocaleString()}
                     </div>
                     <div className="taste-score-label">from your history</div>
                   </div>
                   <div>
-                    <div className="section-eyebrow">Top Artists</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 6 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: 8 }}>Top Artists</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
                       {[...new Set(
                         (analysisResult.clusters?.[0]?.topTracks || []).map(t => t.artistName)
                       )].slice(0, 5).map((a, i) => (
-                        <div key={i} style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{a}</div>
+                        <div key={i} style={{ fontSize: 13, color: 'var(--text-secondary)', fontWeight: 600 }}>{a}</div>
                       ))}
                     </div>
                   </div>
@@ -136,7 +136,7 @@ export default function AnalyzePage() {
                 <div>
                   <div className="taste-score">{analysisResult.fingerprint?.tasteScore}</div>
                   <div className="taste-score-label">Taste Score</div>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, maxWidth: 180, lineHeight: 1.5 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 8, maxWidth: 180, lineHeight: 1.5 }}>
                     Energy×30 + Dance×25 + Valence×20 + Acoustic×15 + Instrumental×10
                   </div>
                 </div>
@@ -160,7 +160,7 @@ export default function AnalyzePage() {
               </div>
             )}
             {analysisResult.liveDataSummary && (
-              <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+              <div style={{ marginTop: 20, fontSize: 11, color: 'var(--text-muted)' }}>
                 Merged: {analysisResult.liveDataSummary.spotifyTopTracks} Spotify top tracks
                 · {analysisResult.liveDataSummary.spotifyRecent} recently played
                 · {analysisResult.liveDataSummary.lastfmTracks} Last.fm tracks
@@ -168,7 +168,9 @@ export default function AnalyzePage() {
             )}
           </div>
 
-          <h2 style={{ marginBottom: 12 }}>Taste Clusters</h2>
+          <div style={{ marginBottom: 16 }}>
+            <h3>Taste Clusters</h3>
+          </div>
           <div className="card-grid">
             {(analysisResult.clusters || []).map(cluster => (
               <ClusterCard key={cluster.id} cluster={cluster} />

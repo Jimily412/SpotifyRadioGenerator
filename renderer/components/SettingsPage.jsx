@@ -49,7 +49,7 @@ export default function SettingsPage({ onClose }) {
     return (
       <div className="settings-overlay">
         <div className="settings-modal" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
-          <span style={{ color: 'var(--text-muted)' }}>Loading...</span>
+          <span style={{ color: 'var(--text-muted)' }}>Loading…</span>
         </div>
       </div>
     );
@@ -58,8 +58,8 @@ export default function SettingsPage({ onClose }) {
   return (
     <div className="settings-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
       <div className="settings-modal">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-          <span style={{ fontSize: 18, fontWeight: 700 }}>Settings</span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 28 }}>
+          <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.3px' }}>Settings</span>
           <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
         </div>
 
@@ -75,7 +75,7 @@ export default function SettingsPage({ onClose }) {
             onChange={e => set('credentials.spotify.clientSecret', e.target.value)} />
         </div>
         <div className="form-group">
-          <label className="form-label">Redirect URI (read-only)</label>
+          <label className="form-label">Redirect URI</label>
           <input className="form-input" value="tasteengine://callback" readOnly />
         </div>
 
@@ -106,13 +106,13 @@ export default function SettingsPage({ onClose }) {
           </div>
         </div>
 
-        <button className="btn btn-primary" onClick={save} style={{ marginBottom: 24 }}>
+        <button className="btn btn-primary" onClick={save} style={{ marginBottom: 24, width: '100%' }}>
           {saved ? '✓ Saved' : 'Save Settings'}
         </button>
 
         <div className="divider" />
 
-        <h3 style={{ marginBottom: 10 }}>Cache</h3>
+        <h3 style={{ marginBottom: 12 }}>Cache</h3>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {[['trackIds', 'Track IDs'], ['audioFeatures', 'Audio Features'], ['recommendations', 'Recommendations']].map(([key, label]) => (
             <button key={key} className="btn btn-secondary btn-sm" onClick={() => window.electronAPI.clearCache(key)}>
@@ -123,7 +123,7 @@ export default function SettingsPage({ onClose }) {
 
         <div className="divider" />
 
-        <h3 style={{ marginBottom: 10 }}>Auth & Updates</h3>
+        <h3 style={{ marginBottom: 12 }}>Auth &amp; Updates</h3>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-danger btn-sm" onClick={reauthorize}>Re-authorize Spotify</button>
           <button className="btn btn-secondary btn-sm" onClick={checkUpdates}>Check for Updates</button>
@@ -131,10 +131,10 @@ export default function SettingsPage({ onClose }) {
         </div>
 
         {updateStatus && (
-          <div className={`notice ${updateStatus.state === 'error' ? 'notice-error' : 'notice-info'}`} style={{ marginTop: 12 }}>
-            {updateStatus.state === 'checking' && 'Checking for updates...'}
+          <div className={`notice ${updateStatus.state === 'error' ? 'notice-error' : 'notice-info'}`} style={{ marginTop: 14 }}>
+            {updateStatus.state === 'checking' && 'Checking for updates…'}
             {updateStatus.state === 'up-to-date' && '✓ You are on the latest version.'}
-            {updateStatus.state === 'available' && `Update v${updateStatus.version} available — downloading...`}
+            {updateStatus.state === 'available' && `Update v${updateStatus.version} available — downloading…`}
             {updateStatus.state === 'downloaded' && `✓ v${updateStatus.version} ready — restart to install.`}
             {updateStatus.state === 'error' && `Update check failed: ${updateStatus.message}`}
           </div>
