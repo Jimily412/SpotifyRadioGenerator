@@ -23,15 +23,9 @@ export default function SettingsPage({ onClose }) {
   }
 
   async function save() {
-    await window.electronAPI.saveSettings({
-      credentials: settings.credentials,
-      settings: settings.settings,
-    });
+    await window.electronAPI.saveSettings({ credentials: settings.credentials, settings: settings.settings });
     setSaved(true);
-  }
-
-  async function clearCache(type) {
-    await window.electronAPI.clearCache(type);
+    setTimeout(() => setSaved(false), 2000);
   }
 
   async function reauthorize() {
@@ -45,45 +39,63 @@ export default function SettingsPage({ onClose }) {
     if (!result.ok) setUpdateStatus({ state: 'error', message: result.message });
   }
 
-  if (!settings) return <div style={{ padding: 32, color: '#888' }}>Loading settings...</div>;
+  async function resetOnboarding() {
+    await window.electronAPI.resetOnboarding();
+    onClose();
+    window.location.reload();
+  }
+
+  if (!settings) {
+    return (
+      <div className="settings-overlay">
+        <div className="settings-modal" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+          <span style={{ color: 'var(--text-muted)' }}>Loading...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-      <div style={{ background: '#141414', border: '1px solid #2a2a2a', borderRadius: 12, width: 560, maxHeight: '85vh', overflow: 'auto', padding: 28 }}>
+    <div className="settings-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="settings-modal">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
-          <h2 style={{ margin: 0 }}>Settings</h2>
-          <button className="btn btn-secondary btn-sm" onClick={onClose}>✕ Close</button>
+          <span style={{ fontSize: 18, fontWeight: 700 }}>Settings</span>
+          <button className="btn btn-ghost btn-sm" onClick={onClose}>✕</button>
         </div>
 
         <h3>Spotify Credentials</h3>
         <div className="form-group">
           <label className="form-label">Client ID</label>
-          <input className="form-input" value={settings.credentials?.spotify?.clientId || ''} onChange={e => set('credentials.spotify.clientId', e.target.value)} />
+          <input className="form-input" value={settings.credentials?.spotify?.clientId || ''}
+            onChange={e => set('credentials.spotify.clientId', e.target.value)} />
         </div>
         <div className="form-group">
           <label className="form-label">Client Secret</label>
-          <input className="form-input" value={settings.credentials?.spotify?.clientSecret || ''} onChange={e => set('credentials.spotify.clientSecret', e.target.value)} />
+          <input className="form-input" type="password" value={settings.credentials?.spotify?.clientSecret || ''}
+            onChange={e => set('credentials.spotify.clientSecret', e.target.value)} />
         </div>
         <div className="form-group">
-          <label className="form-label">Redirect URI (read-only — must be tasteengine://callback)</label>
+          <label className="form-label">Redirect URI (read-only)</label>
           <input className="form-input" value="tasteengine://callback" readOnly />
         </div>
 
-        <h3 style={{ marginTop: 20 }}>Last.fm Credentials</h3>
+        <div className="divider" />
+
+        <h3>Last.fm Credentials</h3>
         <div className="form-group">
           <label className="form-label">API Key</label>
-          <input className="form-input" value={settings.credentials?.lastfm?.apiKey || ''} onChange={e => set('credentials.lastfm.apiKey', e.target.value)} />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Shared Secret</label>
-          <input className="form-input" value={settings.credentials?.lastfm?.secret || ''} onChange={e => set('credentials.lastfm.secret', e.target.value)} />
+          <input className="form-input" value={settings.credentials?.lastfm?.apiKey || ''}
+            onChange={e => set('credentials.lastfm.apiKey', e.target.value)} />
         </div>
         <div className="form-group">
           <label className="form-label">Username</label>
-          <input className="form-input" value={settings.credentials?.lastfm?.username || ''} onChange={e => set('credentials.lastfm.username', e.target.value)} />
+          <input className="form-input" value={settings.credentials?.lastfm?.username || ''}
+            onChange={e => set('credentials.lastfm.username', e.target.value)} />
         </div>
 
-        <h3 style={{ marginTop: 20 }}>Defaults</h3>
+        <div className="divider" />
+
+        <h3>Defaults</h3>
         <div className="form-group">
           <label className="form-label">Default Playlist Size</label>
           <div className="slider-wrapper">
@@ -94,39 +106,42 @@ export default function SettingsPage({ onClose }) {
           </div>
         </div>
 
-        <div style={{ marginTop: 20, marginBottom: 8 }}>
-          <button className="btn btn-primary" onClick={save} style={{ marginRight: 8 }}>
-            {saved ? '✓ Saved' : 'Save Settings'}
-          </button>
+        <button className="btn btn-primary" onClick={save} style={{ marginBottom: 24 }}>
+          {saved ? '✓ Saved' : 'Save Settings'}
+        </button>
+
+        <div className="divider" />
+
+        <h3 style={{ marginBottom: 10 }}>Cache</h3>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {[['trackIds', 'Track IDs'], ['audioFeatures', 'Audio Features'], ['recommendations', 'Recommendations']].map(([key, label]) => (
+            <button key={key} className="btn btn-secondary btn-sm" onClick={() => window.electronAPI.clearCache(key)}>
+              Clear {label}
+            </button>
+          ))}
         </div>
 
-        <h3 style={{ marginTop: 24 }}>Cache</h3>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-          <button className="btn btn-secondary btn-sm" onClick={() => clearCache('trackIds')}>Clear Track ID Cache</button>
-          <button className="btn btn-secondary btn-sm" onClick={() => clearCache('audioFeatures')}>Clear Audio Features Cache</button>
-          <button className="btn btn-secondary btn-sm" onClick={() => clearCache('recommendations')}>Clear Recommendation Cache</button>
-        </div>
+        <div className="divider" />
 
-        <h3 style={{ marginTop: 24 }}>Auth & Updates</h3>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+        <h3 style={{ marginBottom: 10 }}>Auth & Updates</h3>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-danger btn-sm" onClick={reauthorize}>Re-authorize Spotify</button>
           <button className="btn btn-secondary btn-sm" onClick={checkUpdates}>Check for Updates</button>
+          <button className="btn btn-ghost btn-sm" onClick={resetOnboarding}>Run Setup Wizard</button>
         </div>
+
         {updateStatus && (
-          <div style={{ marginTop: 10, fontSize: 13, padding: '8px 12px', borderRadius: 6,
-            background: updateStatus.state === 'error' ? 'rgba(231,76,60,0.1)' : 'rgba(29,185,84,0.08)',
-            border: `1px solid ${updateStatus.state === 'error' ? 'rgba(231,76,60,0.3)' : 'rgba(29,185,84,0.2)'}`,
-            color: updateStatus.state === 'error' ? '#e74c3c' : '#1DB954' }}>
+          <div className={`notice ${updateStatus.state === 'error' ? 'notice-error' : 'notice-info'}`} style={{ marginTop: 12 }}>
             {updateStatus.state === 'checking' && 'Checking for updates...'}
             {updateStatus.state === 'up-to-date' && '✓ You are on the latest version.'}
-            {updateStatus.state === 'available' && `Update v${updateStatus.version} found — downloading...`}
-            {updateStatus.state === 'downloaded' && `✓ v${updateStatus.version} ready — restart to apply.`}
+            {updateStatus.state === 'available' && `Update v${updateStatus.version} available — downloading...`}
+            {updateStatus.state === 'downloaded' && `✓ v${updateStatus.version} ready — restart to install.`}
             {updateStatus.state === 'error' && `Update check failed: ${updateStatus.message}`}
           </div>
         )}
-        <div style={{ marginTop: 20, fontSize: 12, color: '#555' }}>
-          Version: {settings.version || '—'}
-        </div>
+
+        <div className="divider" />
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Version {settings.version || '—'}</div>
       </div>
     </div>
   );

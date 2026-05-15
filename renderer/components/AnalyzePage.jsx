@@ -26,10 +26,8 @@ export default function AnalyzePage() {
     setAnalyzing(true);
     setLogLines([]);
     setAnalysisResult(null);
-
     window.electronAPI.removeProgressLog();
     window.electronAPI.onProgressLog(line => setLogLines(prev => [...prev, line]));
-
     const result = await window.electronAPI.analyzeFingerprint();
     setAnalyzing(false);
     setAnalysisResult(result);
@@ -37,51 +35,65 @@ export default function AnalyzePage() {
 
   return (
     <div>
-      <h1>Analyze Your Taste</h1>
-      <p style={{ marginBottom: 24 }}>Load your Spotify data export to build your audio fingerprint.</p>
+      <div className="page-header">
+        <div className="page-title">Analyze Your Taste</div>
+        <div className="page-subtitle">Load your Spotify data export to build your audio fingerprint.</div>
+      </div>
 
       <div className="card">
-        <h2>Step 1 — Load Spotify Export</h2>
+        <div className="step-header">
+          <div className="step-badge">1</div>
+          <h2>Load Spotify Export</h2>
+        </div>
         <p style={{ marginBottom: 16 }}>
           Select your Spotify data export — either the unzipped folder or the original .zip file.
-          The app will search all subfolders automatically.
+          The app searches all subfolders automatically.
         </p>
-        <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn btn-secondary" onClick={() => loadPath(window.electronAPI.pickFolder)}>
-            📁 Choose Folder
+            Choose Folder
           </button>
           <button className="btn btn-secondary" onClick={() => loadPath(window.electronAPI.pickZip)}>
-            🗜 Choose .zip File
+            Choose .zip File
           </button>
         </div>
         {folderPath && (
-          <div style={{ marginTop: 12, fontSize: 12, color: '#888', wordBreak: 'break-all' }}>{folderPath}</div>
+          <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all', fontFamily: 'monospace' }}>
+            {folderPath}
+          </div>
         )}
-
         {parseResult && !parseResult.error && (
-          <div style={{ marginTop: 16 }}>
+          <div style={{ marginTop: 14 }}>
             <div className="notice notice-info">
-              Detected: <strong>{parseResult.mode}</strong> · {parseResult.trackCount} weighted tracks
-              {parseResult.likedCount > 0 && ` · ${parseResult.likedCount} liked songs`}
-              {parseResult.dateRange && ` · ${new Date(parseResult.dateRange.from).toLocaleDateString()} – ${new Date(parseResult.dateRange.to).toLocaleDateString()}`}
+              <strong>{parseResult.mode}</strong> — {parseResult.trackCount.toLocaleString()} weighted tracks
+              {parseResult.likedCount > 0 && ` · ${parseResult.likedCount.toLocaleString()} liked`}
+              {parseResult.dateRange && (
+                <> · {new Date(parseResult.dateRange.from).getFullYear()}–{new Date(parseResult.dateRange.to).getFullYear()}</>
+              )}
             </div>
             {parseResult.warning && <div className="notice notice-warn">{parseResult.warning}</div>}
           </div>
         )}
-        {parseResult?.error && <div className="notice notice-error" style={{ marginTop: 12 }}>{parseResult.error}</div>}
+        {parseResult?.error && (
+          <div className="notice notice-error" style={{ marginTop: 12 }}>{parseResult.error}</div>
+        )}
       </div>
 
       <div className="card">
-        <h2>Step 2 — Analyze My Taste</h2>
-        <p style={{ marginBottom: 16 }}>Fetches live Spotify + Last.fm data, resolves track IDs, fetches audio features, and runs K-means clustering.</p>
+        <div className="step-header">
+          <div className="step-badge">2</div>
+          <h2>Analyze My Taste</h2>
+        </div>
+        <p style={{ marginBottom: 16 }}>
+          Fetches live Spotify + Last.fm data, resolves track IDs, and runs clustering on your full history.
+        </p>
         <button
           className="btn btn-primary"
           disabled={analyzing || (!parseResult && !folderPath)}
           onClick={runAnalysis}
         >
-          {analyzing ? '⏳ Analyzing...' : '▶ Analyze My Taste'}
+          {analyzing ? 'Analyzing...' : '▶  Analyze My Taste'}
         </button>
-
         {(analyzing || logLines.length > 0) && (
           <div style={{ marginTop: 16 }}>
             <ProgressLog lines={logLines} />
@@ -93,27 +105,27 @@ export default function AnalyzePage() {
         <>
           <div className="card">
             <h2>Your Music Fingerprint</h2>
-
             {!analysisResult.audioFeaturesAvailable ? (
               <>
                 <div className="notice notice-warn" style={{ marginBottom: 16 }}>
-                  Spotify's audio features endpoint (energy, danceability, etc.) is restricted for this app —
-                  this is a Spotify API policy for newer apps. Playlists still generate using your listening
-                  history. The radar chart requires a Spotify app with extended API access.
+                  Spotify's audio features endpoint is restricted for this app. Playlists still generate using your
+                  listening history. The radar chart requires extended API access.
                 </div>
-                <div style={{ display: 'flex', gap: 32, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 36, flexWrap: 'wrap' }}>
                   <div>
-                    <div style={{ fontSize: 12, color: '#888', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Tracks Analysed</div>
-                    <div className="taste-score">{analysisResult.clusters?.reduce((s, c) => s + c.trackCount, 0)}</div>
+                    <div className="section-eyebrow">Tracks Analysed</div>
+                    <div className="taste-score">
+                      {analysisResult.clusters?.reduce((s, c) => s + c.trackCount, 0).toLocaleString()}
+                    </div>
                     <div className="taste-score-label">from your history</div>
                   </div>
                   <div>
-                    <div style={{ fontSize: 12, color: '#888', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Top Artists</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div className="section-eyebrow">Top Artists</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 6 }}>
                       {[...new Set(
                         (analysisResult.clusters?.[0]?.topTracks || []).map(t => t.artistName)
                       )].slice(0, 5).map((a, i) => (
-                        <div key={i} style={{ fontSize: 13, color: '#ccc' }}>{a}</div>
+                        <div key={i} style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{a}</div>
                       ))}
                     </div>
                   </div>
@@ -124,7 +136,7 @@ export default function AnalyzePage() {
                 <div>
                   <div className="taste-score">{analysisResult.fingerprint?.tasteScore}</div>
                   <div className="taste-score-label">Taste Score</div>
-                  <div style={{ fontSize: 11, color: '#555', marginTop: 4, maxWidth: 200 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, maxWidth: 180, lineHeight: 1.5 }}>
                     Energy×30 + Dance×25 + Valence×20 + Acoustic×15 + Instrumental×10
                   </div>
                 </div>
@@ -135,7 +147,7 @@ export default function AnalyzePage() {
                       const val = analysisResult.fingerprint?.avg?.[f] || 0;
                       return (
                         <div key={f} className="feature-row">
-                          <span className="feature-name" style={{ textTransform: 'capitalize' }}>{f}</span>
+                          <span className="feature-name">{f}</span>
                           <div className="feature-bar-bg">
                             <div className="feature-bar-fill" style={{ width: `${val * 100}%` }} />
                           </div>
@@ -147,17 +159,16 @@ export default function AnalyzePage() {
                 </div>
               </div>
             )}
-
             {analysisResult.liveDataSummary && (
-              <div style={{ marginTop: 16, fontSize: 12, color: '#666' }}>
-                Live data merged: {analysisResult.liveDataSummary.spotifyTopTracks} Spotify top tracks,{' '}
-                {analysisResult.liveDataSummary.spotifyRecent} recently played,{' '}
-                {analysisResult.liveDataSummary.lastfmTracks} Last.fm tracks
+              <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text-muted)' }}>
+                Merged: {analysisResult.liveDataSummary.spotifyTopTracks} Spotify top tracks
+                · {analysisResult.liveDataSummary.spotifyRecent} recently played
+                · {analysisResult.liveDataSummary.lastfmTracks} Last.fm tracks
               </div>
             )}
           </div>
 
-          <h2>Taste Clusters</h2>
+          <h2 style={{ marginBottom: 12 }}>Taste Clusters</h2>
           <div className="card-grid">
             {(analysisResult.clusters || []).map(cluster => (
               <ClusterCard key={cluster.id} cluster={cluster} />
