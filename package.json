@@ -12,6 +12,7 @@
     "build:linux": "webpack --config webpack.config.js && electron-builder --linux"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "axios": "^1.7.2",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.8",

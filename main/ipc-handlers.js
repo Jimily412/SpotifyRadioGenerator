@@ -1,7 +1,7 @@
 const { ipcMain, dialog, shell, app } = require('electron');
 const { getStore, cacheClear } = require('./store');
 const { startOAuth, clearTokens, getValidAccessTokenOrRefresh } = require('./spotify-auth');
-const { parseExportFolder } = require('./data-parser');
+const { parseExport } = require('./data-parser');
 const { fetchLastfmData } = require('./lastfm-api');
 const {
   SessionBudget, getTopTracks, getRecentlyPlayed, getLikedTracks,
@@ -53,8 +53,12 @@ function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('pick-folder', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-      title: 'Select your Spotify data export folder',
+      properties: ['openDirectory', 'openFile'],
+      filters: [
+        { name: 'Spotify Export', extensions: ['zip'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+      title: 'Select your Spotify export folder or .zip file',
     });
     if (result.canceled) return { canceled: true };
     return { path: result.filePaths[0] };
@@ -62,7 +66,7 @@ function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('parse-export', async (_, folderPath) => {
     try {
-      const result = parseExportFolder(folderPath);
+      const result = parseExport(folderPath);
       if (!result.error) {
         getStore().set('parsedData', result);
       }
