@@ -306,6 +306,24 @@ function registerIpcHandlers(mainWindow) {
       return { ok: false, message: err.message };
     }
   });
+
+  ipcMain.handle('get-onboarding-state', async () => {
+    const store = getStore();
+    return {
+      completed: store.get('onboarding.completed') === true,
+      credentials: store.get('credentials'),
+    };
+  });
+
+  ipcMain.handle('complete-onboarding', async () => {
+    getStore().set('onboarding.completed', true);
+    return { ok: true };
+  });
+
+  ipcMain.handle('reset-onboarding', async () => {
+    getStore().set('onboarding.completed', false);
+    return { ok: true };
+  });
 }
 
 module.exports = { registerIpcHandlers };

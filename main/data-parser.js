@@ -27,6 +27,17 @@ function isHistoryFile(name) {
          /^Streaming_History_Audio_.*\.json$/i.test(name);
 }
 
+// Secondary: content-based detection for files that don't match the filename pattern.
+// Spotify may change export filenames without notice.
+function looksLikeHistoryContent(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return false;
+  const sample = entries[0];
+  // Must have a play duration field and at least one track name field
+  const hasMs = 'msPlayed' in sample || 'ms_played' in sample;
+  const hasTrack = 'trackName' in sample || 'master_metadata_track_name' in sample;
+  return hasMs && hasTrack;
+}
+
 function isLibraryFile(name) {
   return name === 'YourLibrary.json';
 }
@@ -160,10 +171,23 @@ function parseExportFolder(folderPath) {
   const weightMap = {};
   const dateMap   = {};
 
+  // Also scan all JSON files in the folder using content detection as a fallback
+  const allJsonPaths = findFiles(folderPath, n => n.toLowerCase().endsWith('.json'));
+  const extraHistoryPaths = allJsonPaths.filter(p => !historyPaths.includes(p) && !libraryPaths.includes(p));
+
   for (const filePath of historyPaths) {
     try {
       const entries = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
       parseHistoryEntries(entries, weightMap, dateMap);
+    } catch (_) {}
+  }
+
+  for (const filePath of extraHistoryPaths) {
+    try {
+      const entries = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (looksLikeHistoryContent(entries)) {
+        parseHistoryEntries(entries, weightMap, dateMap);
+      }
     } catch (_) {}
   }
 

@@ -9,10 +9,13 @@ export default function ProgressLog({ lines }) {
 
   return (
     <div className="progress-log">
-      {lines.length === 0 && <span style={{ color: '#555' }}>Progress will appear here...</span>}
-      {lines.map((line, i) => (
-        <div key={i} className="log-line">{line}</div>
-      ))}
+      {lines.length === 0 && <span>Waiting...</span>}
+      {lines.map((line, i) => {
+        const isLast = i === lines.length - 1;
+        const isError = /error|failed|fail/i.test(line);
+        const cls = isError ? 'log-line log-error' : isLast ? 'log-line log-latest' : 'log-line';
+        return <div key={i} className={cls}>{line}</div>;
+      })}
       <div ref={endRef} />
     </div>
   );

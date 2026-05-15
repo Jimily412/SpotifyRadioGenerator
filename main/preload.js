@@ -37,4 +37,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Last run info
   getLastPlaylist: () => ipcRenderer.invoke('get-last-playlist'),
+
+  // Onboarding
+  getOnboardingState: () => ipcRenderer.invoke('get-onboarding-state'),
+  completeOnboarding: () => ipcRenderer.invoke('complete-onboarding'),
+  resetOnboarding: () => ipcRenderer.invoke('reset-onboarding'),
 });

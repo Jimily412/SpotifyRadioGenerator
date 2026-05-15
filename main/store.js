@@ -28,11 +28,19 @@ function initStore() {
         defaultPlaylistSize: 150,
         defaultPlaylistNameTemplate: 'TasteEngine Mix — {date}',
       },
+      onboarding: { completed: false },
       lastPlaylist: null,
       parsedData: null,
       fingerprint: null,
     },
   });
+
+  // Migration: existing users who already have a valid token skip onboarding
+  const tokens = _store.get('tokens');
+  if (tokens && tokens.access_token && !_store.get('onboarding.completed')) {
+    _store.set('onboarding.completed', true);
+  }
+
   return _store;
 }
 
