@@ -5,9 +5,9 @@ const { parseExport } = require('./data-parser');
 const { fetchLastfmData } = require('./lastfm-api');
 const {
   SessionBudget, getTopTracks, getRecentlyPlayed, getLikedTracks,
-  resolveTrackIds, getAudioFeatures, createPlaylist,
+  resolveTrackIds, getAudioFeatures, getArtistGenres, createPlaylist,
 } = require('./spotify-api');
-const { mergeWeights, computeFingerprint, clusterTracks, clusterByWeight, computeQuotas } = require('./fingerprint');
+const { mergeWeights, computeFingerprint, clusterTracks, clusterByGenre, clusterByWeight, computeQuotas } = require('./fingerprint');
 const { harvestRecommendations, buildFinalPlaylist } = require('./recommender');
 
 let mainWindow_ = null;
@@ -111,16 +111,15 @@ function registerIpcHandlers(mainWindow) {
       const top300 = merged.slice(0, 300);
 
       logFn(`Resolving track IDs (${top300.length} tracks)...`);
-      const idMap = await resolveTrackIds(top300, budget, logFn);
+      const { trackIds, artistIds } = await resolveTrackIds(top300, budget, logFn);
 
       // Augment tracks with spotifyId
       for (const t of top300) {
-        const key = `${t.artistName.toLowerCase().trim()}|${t.trackName.toLowerCase().trim()}`;
-        const id = idMap[`${t.artistName.trim()}|${t.trackName.trim()}`];
-        if (id) t.spotifyId = id;
+        const key = `${t.artistName.trim()}|${t.trackName.trim()}`;
+        if (trackIds[key]) t.spotifyId = trackIds[key];
       }
 
-      const resolvedIds = Object.values(idMap);
+      const resolvedIds = Object.values(trackIds);
       logFn(`Fetching audio features (${resolvedIds.length} tracks)...`);
       const featureMap = await getAudioFeatures(resolvedIds, budget, logFn);
 
@@ -136,9 +135,17 @@ function registerIpcHandlers(mainWindow) {
         fingerprint = computeFingerprint(tracksWithFeatures);
         clusters = clusterTracks(tracksWithFeatures);
       } else {
-        logFn(`Audio features unavailable — using weight-based clustering on ${resolvedTracks.length} tracks...`);
+        logFn(`Fetching artist genres for mood clustering...`);
+        const genreMap = await getArtistGenres(artistIds, budget, logFn);
+        const hasGenres = Object.values(genreMap).some(g => g.length > 0);
+        if (hasGenres) {
+          logFn(`Running genre-based clustering on ${resolvedTracks.length} tracks...`);
+          clusters = clusterByGenre(resolvedTracks, genreMap);
+        } else {
+          logFn(`No genre data — falling back to weight clustering...`);
+          clusters = clusterByWeight(resolvedTracks);
+        }
         fingerprint = null;
-        clusters = clusterByWeight(resolvedTracks);
       }
 
       lastFingerprintData = { fingerprint, clusters, tracksWithFeatures: audioFeaturesAvailable ? tracksWithFeatures : resolvedTracks, merged };

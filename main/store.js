@@ -5,16 +5,8 @@ function initStore() {
   _store = new Store({
     defaults: {
       credentials: {
-        spotify: {
-          clientId: '715f159d73c8495eb739c0e6ed082355',
-          clientSecret: '78643b0ab4e64f3ca79ce0ab45a8310b',
-          redirectUri: 'tasteengine://callback',
-        },
-        lastfm: {
-          apiKey: '997e6d08e44b5ffcc53e962ee4100770',
-          secret: 'fee1b69a05ecb6041c67b5a2c5828fc3',
-          username: 'JimJeffords',
-        },
+        spotify: { redirectUri: 'tasteengine://callback' },
+        lastfm: {},
       },
       tokens: {},
       cache: {

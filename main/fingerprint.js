@@ -145,6 +145,66 @@ function fallbackClusters(tracks) {
   }));
 }
 
+const GENRE_LABELS = ['Hype', 'Chill', 'Feel Good', 'Dark / Moody', 'Focus / Instrumental', 'Mixed'];
+
+function genreToCluster(genre) {
+  genre = genre.toLowerCase();
+  if (/hip.?hop|rap|trap|drill|grime|dancehall|bounce|crunk|twerk/.test(genre)) return 0;
+  if (/\bedm\b|house|techno|trance|drum.and.bass|dubstep|hardstyle|electro|club|rave/.test(genre)) return 0;
+  if (/ambient|chill|lo.?fi|new.?age|downtempo|meditation|sleep|relaxing/.test(genre)) return 1;
+  if (/dream.?pop|bedroom.?pop|shoegaze|folktronica|bossa/.test(genre)) return 1;
+  if (/\bfolk\b|singer.songwriter|acoustic|indie.folk|country/.test(genre)) return 1;
+  if (/\bfunk\b|\bsoul\b|r&b|rhythm.and.blues|reggae|disco|motown/.test(genre)) return 2;
+  if (/\bpop\b/.test(genre) && !/post.punk|noise.pop/.test(genre)) return 2;
+  if (/metal|doom|thrash|grindcore|death|black metal/.test(genre)) return 3;
+  if (/punk|hardcore|screamo|emo|grunge|post.punk|darkwave|gothic|goth|industrial|noise/.test(genre)) return 3;
+  if (/\brock\b|alternative|alt.rock|garage/.test(genre)) return 3;
+  if (/classical|jazz|instrumental|post.rock|film.score|soundtrack|orchestral|neoclassical|chamber|piano|opera/.test(genre)) return 4;
+  if (/progressive|math.rock|post.metal/.test(genre)) return 4;
+  return -1;
+}
+
+function clusterByGenre(tracks, artistGenreMap) {
+  const bins = Array.from({ length: 6 }, () => []);
+  let classified = 0;
+
+  for (const track of tracks) {
+    const genres = artistGenreMap[track.artistName?.toLowerCase().trim()] || [];
+    if (genres.length === 0) { bins[5].push(track); continue; }
+
+    const votes = [0, 0, 0, 0, 0];
+    for (const g of genres) {
+      const c = genreToCluster(g);
+      if (c >= 0) votes[c]++;
+    }
+    const max = Math.max(...votes);
+    if (max > 0) {
+      bins[votes.indexOf(max)].push(track);
+      classified++;
+    } else {
+      bins[5].push(track);
+    }
+  }
+
+  const totalWeight = tracks.reduce((s, t) => s + t.weight, 0);
+
+  return bins.map((binTracks, i) => {
+    const sorted = [...binTracks].sort((a, b) => b.weight - a.weight);
+    const bw = binTracks.reduce((s, t) => s + t.weight, 0);
+    return {
+      id: i,
+      tracks: sorted,
+      centroid: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.5; return o; }, {}),
+      label: GENRE_LABELS[i],
+      totalWeight: bw,
+      pct: totalWeight > 0 ? bw / totalWeight : 0,
+      weightPct: totalWeight > 0 ? (bw / totalWeight * 100).toFixed(1) : '0',
+      topTracks: sorted.slice(0, 5),
+      std: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.3; return o; }, {}),
+    };
+  });
+}
+
 const WEIGHT_BAND_LABELS = ['Top Picks', 'Heavy Rotation', 'Regular Plays', 'Occasional Plays', 'Light Plays', 'Discovery Seeds'];
 
 // Used when Spotify audio features are unavailable — splits tracks into 6
@@ -191,4 +251,4 @@ function computeQuotas(clusters, targetSize) {
   return quotas;
 }
 
-module.exports = { mergeWeights, computeFingerprint, clusterTracks, clusterByWeight, computeQuotas, FEATURE_NAMES };
+module.exports = { mergeWeights, computeFingerprint, clusterTracks, clusterByGenre, clusterByWeight, computeQuotas, FEATURE_NAMES };

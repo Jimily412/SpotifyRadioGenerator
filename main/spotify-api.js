@@ -30,10 +30,12 @@ class SessionBudget {
       topTracks: 6,
       recentlyPlayed: 1,
       libraryRead: 3,
+      artistLookup: 6,
     };
     this.used = {
       search: 0, audioFeatures: 0, recommendations: 0,
       playlistWrite: 0, topTracks: 0, recentlyPlayed: 0, libraryRead: 0,
+      artistLookup: 0,
     };
   }
 
@@ -174,10 +176,11 @@ async function getLikedTracks(budget, logFn) {
 
 async function resolveTrackIds(tracks, budget, logFn) {
   const accessToken = await getValidAccessTokenOrRefresh();
-  if (!accessToken) return {};
+  if (!accessToken) return { trackIds: {}, artistIds: {} };
   const client = createClient(accessToken);
 
-  const idMap = {};
+  const trackIds = {};
+  const artistIds = {};
   let cacheHits = 0;
   let liveCalls = 0;
 
@@ -185,7 +188,9 @@ async function resolveTrackIds(tracks, budget, logFn) {
     const key = `${track.artistName}|${track.trackName}`;
     const cached = cacheGet('trackIds', key);
     if (cached) {
-      idMap[key] = cached;
+      // Handle both old string cache entries and new {trackId, artistId} objects
+      trackIds[key] = typeof cached === 'string' ? cached : cached.trackId;
+      if (cached.artistId) artistIds[track.artistName.toLowerCase().trim()] = cached.artistId;
       cacheHits++;
       continue;
     }
@@ -199,16 +204,62 @@ async function resolveTrackIds(tracks, budget, logFn) {
       liveCalls++;
       const item = data.body.tracks?.items?.[0];
       if (item) {
-        idMap[key] = item.id;
-        cacheSet('trackIds', key, item.id);
+        const artistId = item.artists?.[0]?.id;
+        trackIds[key] = item.id;
+        if (artistId) artistIds[track.artistName.toLowerCase().trim()] = artistId;
+        cacheSet('trackIds', key, { trackId: item.id, artistId });
       }
     } catch (err) {
       if (err.budgetExhausted) { budget.used.search = budget.limits.search; break; }
     }
   }
 
-  logFn && logFn(`Resolved track IDs — cache: ${cacheHits}, live: ${liveCalls}, total: ${Object.keys(idMap).length}`);
-  return idMap;
+  logFn && logFn(`Resolved track IDs — cache: ${cacheHits}, live: ${liveCalls}, total: ${Object.keys(trackIds).length}`);
+  return { trackIds, artistIds };
+}
+
+async function getArtistGenres(artistIds, budget, logFn) {
+  const genreMap = {};
+  const uniqueIds = [];
+  const idToName = {};
+
+  for (const [name, id] of Object.entries(artistIds)) {
+    if (id && !idToName[id]) {
+      idToName[id] = name;
+      uniqueIds.push(id);
+    }
+  }
+  if (uniqueIds.length === 0) return genreMap;
+
+  const accessToken = await getValidAccessTokenOrRefresh();
+  if (!accessToken) return genreMap;
+  const axios = require('axios');
+
+  for (let i = 0; i < uniqueIds.length; i += 50) {
+    if (!budget.canCall('artistLookup')) break;
+    const batch = uniqueIds.slice(i, i + 50);
+    try {
+      await sleep(DELAY_MS);
+      const resp = await axios.get('https://api.spotify.com/v1/artists', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: { ids: batch.join(',') },
+        timeout: 15000,
+      });
+      budget.spend('artistLookup');
+      for (const artist of (resp.data.artists || [])) {
+        if (!artist) continue;
+        const name = idToName[artist.id];
+        if (name) genreMap[name] = artist.genres || [];
+      }
+    } catch (err) {
+      logFn && logFn(`Artist genre lookup failed: ${err.message}`);
+      break;
+    }
+  }
+
+  const classified = Object.values(genreMap).filter(g => g.length > 0).length;
+  logFn && logFn(`Genre data: ${classified}/${Object.keys(genreMap).length} artists with genres`);
+  return genreMap;
 }
 
 async function getAudioFeatures(trackIds, budget, logFn) {
@@ -348,6 +399,7 @@ module.exports = {
   getLikedTracks,
   resolveTrackIds,
   getAudioFeatures,
+  getArtistGenres,
   getTracksByArtistNames,
   createPlaylist,
 };
