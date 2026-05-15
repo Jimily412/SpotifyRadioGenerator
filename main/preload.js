@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Data
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  pickZip: () => ipcRenderer.invoke('pick-zip'),
   parseExport: (folderPath) => ipcRenderer.invoke('parse-export', folderPath),
   analyzeFingerprint: () => ipcRenderer.invoke('analyze-fingerprint'),
 

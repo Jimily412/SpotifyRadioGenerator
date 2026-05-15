@@ -53,12 +53,18 @@ function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('pick-folder', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory', 'openFile'],
-      filters: [
-        { name: 'Spotify Export', extensions: ['zip'] },
-        { name: 'All Files', extensions: ['*'] },
-      ],
-      title: 'Select your Spotify export folder or .zip file',
+      properties: ['openDirectory'],
+      title: 'Select your Spotify export folder',
+    });
+    if (result.canceled) return { canceled: true };
+    return { path: result.filePaths[0] };
+  });
+
+  ipcMain.handle('pick-zip', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'Spotify Export ZIP', extensions: ['zip'] }],
+      title: 'Select your Spotify export .zip file',
     });
     if (result.canceled) return { canceled: true };
     return { path: result.filePaths[0] };

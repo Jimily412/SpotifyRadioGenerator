@@ -12,13 +12,12 @@ export default function AnalyzePage() {
   const [analysisResult, setAnalysisResult] = useState(null);
   const [logLines, setLogLines] = useState([]);
 
-  async function pickFolder() {
-    const result = await window.electronAPI.pickFolder();
+  async function loadPath(apiCall) {
+    const result = await apiCall();
     if (result.canceled) return;
     setFolderPath(result.path);
     setParseResult(null);
     setAnalysisResult(null);
-
     const parsed = await window.electronAPI.parseExport(result.path);
     setParseResult(parsed);
   }
@@ -43,10 +42,18 @@ export default function AnalyzePage() {
 
       <div className="card">
         <h2>Step 1 — Load Spotify Export</h2>
-        <p style={{ marginBottom: 16 }}>Select the folder containing your Spotify data export files (StreamingHistory_music_*.json and/or YourLibrary.json).</p>
-        <button className="btn btn-secondary" onClick={pickFolder}>
-          📁 Choose Folder
-        </button>
+        <p style={{ marginBottom: 16 }}>
+          Select your Spotify data export — either the unzipped folder or the original .zip file.
+          The app will search all subfolders automatically.
+        </p>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn btn-secondary" onClick={() => loadPath(window.electronAPI.pickFolder)}>
+            📁 Choose Folder
+          </button>
+          <button className="btn btn-secondary" onClick={() => loadPath(window.electronAPI.pickZip)}>
+            🗜 Choose .zip File
+          </button>
+        </div>
         {folderPath && (
           <div style={{ marginTop: 12, fontSize: 12, color: '#888', wordBreak: 'break-all' }}>{folderPath}</div>
         )}
