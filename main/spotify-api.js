@@ -27,7 +27,7 @@ class SessionBudget {
       audioFeatures: 10,
       recommendations: 30,
       playlistWrite: 5,
-      topTracks: 4,
+      topTracks: 6,
       recentlyPlayed: 1,
       libraryRead: 3,
     };
@@ -96,7 +96,7 @@ async function getTopTracks(budget, logFn) {
 
   const results = [];
 
-  for (const [range, weight] of [['short_term', 8], ['medium_term', 5]]) {
+  for (const [range, weight] of [['short_term', 4], ['medium_term', 4], ['long_term', 4]]) {
     if (!budget.canCall('topTracks')) break;
     try {
       const data = await apiCallWithRetry(() => client.getMyTopTracks({ time_range: range, limit: 50 }));

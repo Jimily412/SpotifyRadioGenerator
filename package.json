@@ -1,6 +1,6 @@
 {
   "name": "tasteengine",
-  "version": "1.0.0",
+  "version": "1.0.8",
   "description": "Personal Spotify AI playlist generator",
   "main": "main/index.js",
   "scripts": {
@@ -12,6 +12,7 @@
     "build:linux": "webpack --config webpack.config.js && electron-builder --linux"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "axios": "^1.7.2",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.1.8",
@@ -69,7 +70,8 @@
     "publish": {
       "provider": "github",
       "owner": "Jimily412",
-      "repo": "SpotifyRadioGenerator"
+      "repo": "SpotifyRadioGenerator",
+      "releaseType": "release"
     }
   }
 }
