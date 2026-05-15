@@ -3,9 +3,11 @@ import React, { useEffect, useState } from 'react';
 export default function SettingsPage({ onClose }) {
   const [settings, setSettings] = useState(null);
   const [saved, setSaved] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState(null);
 
   useEffect(() => {
     window.electronAPI.getSettings().then(setSettings);
+    window.electronAPI.onUpdateStatus(data => setUpdateStatus(data));
   }, []);
 
   function set(path, val) {
@@ -38,7 +40,9 @@ export default function SettingsPage({ onClose }) {
   }
 
   async function checkUpdates() {
-    await window.electronAPI.checkForUpdates();
+    setUpdateStatus({ state: 'checking' });
+    const result = await window.electronAPI.checkForUpdates();
+    if (!result.ok) setUpdateStatus({ state: 'error', message: result.message });
   }
 
   if (!settings) return <div style={{ padding: 32, color: '#888' }}>Loading settings...</div>;
@@ -108,7 +112,18 @@ export default function SettingsPage({ onClose }) {
           <button className="btn btn-danger btn-sm" onClick={reauthorize}>Re-authorize Spotify</button>
           <button className="btn btn-secondary btn-sm" onClick={checkUpdates}>Check for Updates</button>
         </div>
-
+        {updateStatus && (
+          <div style={{ marginTop: 10, fontSize: 13, padding: '8px 12px', borderRadius: 6,
+            background: updateStatus.state === 'error' ? 'rgba(231,76,60,0.1)' : 'rgba(29,185,84,0.08)',
+            border: `1px solid ${updateStatus.state === 'error' ? 'rgba(231,76,60,0.3)' : 'rgba(29,185,84,0.2)'}`,
+            color: updateStatus.state === 'error' ? '#e74c3c' : '#1DB954' }}>
+            {updateStatus.state === 'checking' && 'Checking for updates...'}
+            {updateStatus.state === 'up-to-date' && '✓ You are on the latest version.'}
+            {updateStatus.state === 'available' && `Update v${updateStatus.version} found — downloading...`}
+            {updateStatus.state === 'downloaded' && `✓ v${updateStatus.version} ready — restart to apply.`}
+            {updateStatus.state === 'error' && `Update check failed: ${updateStatus.message}`}
+          </div>
+        )}
         <div style={{ marginTop: 20, fontSize: 12, color: '#555' }}>
           Version: {settings.version || '—'}
         </div>

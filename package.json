@@ -1,6 +1,6 @@
 {
   "name": "tasteengine",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Personal Spotify AI playlist generator",
   "main": "main/index.js",
   "scripts": {
@@ -70,7 +70,8 @@
     "publish": {
       "provider": "github",
       "owner": "Jimily412",
-      "repo": "SpotifyRadioGenerator"
+      "repo": "SpotifyRadioGenerator",
+      "releaseType": "release"
     }
   }
 }

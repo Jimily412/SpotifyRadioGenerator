@@ -214,7 +214,6 @@ async function resolveTrackIds(tracks, budget, logFn) {
 async function getAudioFeatures(trackIds, budget, logFn) {
   const accessToken = await getValidAccessTokenOrRefresh();
   if (!accessToken) return {};
-  const client = createClient(accessToken);
 
   const featureMap = {};
   const uncached = [];
@@ -238,19 +237,34 @@ async function getAudioFeatures(trackIds, budget, logFn) {
   let liveCalls = 0;
   for (const batch of batches) {
     if (!budget.canCall('audioFeatures')) break;
+    await sleep(DELAY_MS);
     try {
-      const data = await apiCallWithRetry(() => client.getAudioFeaturesForTracks(batch));
+      const axios = require('axios');
+      const resp = await axios.get('https://api.spotify.com/v1/audio-features', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        params: { ids: batch.join(',') },
+        timeout: 15000,
+      });
       budget.spend('audioFeatures');
       liveCalls++;
-      for (const f of (data.body.audio_features || [])) {
+      for (const f of (resp.data.audio_features || [])) {
         if (!f) continue;
         const normalized = normalizeFeatures(f);
         featureMap[f.id] = normalized;
         cacheSet('audioFeatures', f.id, normalized);
       }
     } catch (err) {
-      if (err.budgetExhausted) { budget.used.audioFeatures = budget.limits.audioFeatures; break; }
-      logFn && logFn(`Audio features batch failed: ${err.message}`);
+      const status = err.response?.status;
+      const msg = err.response?.data?.error?.message || err.message;
+      logFn && logFn(`Audio features failed [HTTP ${status || 'network'}]: ${msg}`);
+      if (status === 403) {
+        logFn && logFn('Audio features endpoint is not available for this Spotify app — using weight-based clustering instead.');
+        break;
+      }
+      if (status === 429) {
+        const wait = parseInt(err.response?.headers?.['retry-after'] || '5', 10) * 1000;
+        await sleep(wait);
+      }
     }
   }
 

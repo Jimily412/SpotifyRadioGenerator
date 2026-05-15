@@ -141,8 +141,44 @@ function fallbackClusters(tracks) {
     totalWeight: i === 0 ? tracks.reduce((s, t) => s + t.weight, 0) : 0,
     weightPct: i === 0 ? '100' : '0',
     topTracks: i === 0 ? tracks.slice(0, 5) : [],
-    std: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.1; return o; }, {}),
+    std: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.3; return o; }, {}),
   }));
+}
+
+const WEIGHT_BAND_LABELS = ['Top Picks', 'Heavy Rotation', 'Regular Plays', 'Occasional Plays', 'Light Plays', 'Discovery Seeds'];
+
+// Used when Spotify audio features are unavailable — splits tracks into 6
+// weight bands so recommendations can still be seeded meaningfully.
+function clusterByWeight(tracks) {
+  if (tracks.length === 0) return fallbackClusters([]);
+  const sorted = [...tracks].sort((a, b) => b.weight - a.weight);
+  const totalWeight = sorted.reduce((s, t) => s + t.weight, 0);
+
+  // Split into 6 roughly equal-weight bands
+  const bands = Array.from({ length: 6 }, () => []);
+  let cumWeight = 0;
+  let band = 0;
+  const bandTarget = totalWeight / 6;
+
+  for (const t of sorted) {
+    if (band < 5 && cumWeight >= bandTarget * (band + 1)) band++;
+    bands[band].push(t);
+    cumWeight += t.weight;
+  }
+
+  return bands.map((bandTracks, i) => {
+    const bw = bandTracks.reduce((s, t) => s + t.weight, 0);
+    return {
+      id: i,
+      tracks: bandTracks,
+      centroid: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.5; return o; }, {}),
+      label: WEIGHT_BAND_LABELS[i],
+      totalWeight: bw,
+      weightPct: totalWeight > 0 ? (bw / totalWeight * 100).toFixed(1) : '0',
+      topTracks: bandTracks.slice(0, 5),
+      std: FEATURE_NAMES.reduce((o, f) => { o[f] = 0.3; return o; }, {}),
+    };
+  });
 }
 
 function computeQuotas(clusters, targetSize) {
@@ -155,4 +191,4 @@ function computeQuotas(clusters, targetSize) {
   return quotas;
 }
 
-module.exports = { mergeWeights, computeFingerprint, clusterTracks, computeQuotas, FEATURE_NAMES };
+module.exports = { mergeWeights, computeFingerprint, clusterTracks, clusterByWeight, computeQuotas, FEATURE_NAMES };

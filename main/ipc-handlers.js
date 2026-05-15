@@ -7,7 +7,7 @@ const {
   SessionBudget, getTopTracks, getRecentlyPlayed, getLikedTracks,
   resolveTrackIds, getAudioFeatures, createPlaylist,
 } = require('./spotify-api');
-const { mergeWeights, computeFingerprint, clusterTracks, computeQuotas } = require('./fingerprint');
+const { mergeWeights, computeFingerprint, clusterTracks, clusterByWeight, computeQuotas } = require('./fingerprint');
 const { harvestRecommendations, buildFinalPlaylist } = require('./recommender');
 
 let mainWindow_ = null;
@@ -127,11 +127,21 @@ function registerIpcHandlers(mainWindow) {
       const tracksWithFeatures = top300.filter(t => t.spotifyId && featureMap[t.spotifyId])
         .map(t => ({ ...t, features: featureMap[t.spotifyId] }));
 
-      logFn(`Running taste clustering on ${tracksWithFeatures.length} tracks...`);
-      const fingerprint = computeFingerprint(tracksWithFeatures);
-      const clusters = clusterTracks(tracksWithFeatures);
+      const resolvedTracks = top300.filter(t => t.spotifyId);
+      const audioFeaturesAvailable = tracksWithFeatures.length > 0;
 
-      lastFingerprintData = { fingerprint, clusters, tracksWithFeatures, merged };
+      let fingerprint, clusters;
+      if (audioFeaturesAvailable) {
+        logFn(`Running audio-feature clustering on ${tracksWithFeatures.length} tracks...`);
+        fingerprint = computeFingerprint(tracksWithFeatures);
+        clusters = clusterTracks(tracksWithFeatures);
+      } else {
+        logFn(`Audio features unavailable — using weight-based clustering on ${resolvedTracks.length} tracks...`);
+        fingerprint = null;
+        clusters = clusterByWeight(resolvedTracks);
+      }
+
+      lastFingerprintData = { fingerprint, clusters, tracksWithFeatures: audioFeaturesAvailable ? tracksWithFeatures : resolvedTracks, merged };
       store.set('fingerprint', { fingerprint, clusters: clusters.map(c => ({ ...c, tracks: undefined, topTracks: c.topTracks })) });
 
       logFn('Analysis complete!');
@@ -284,11 +294,16 @@ function registerIpcHandlers(mainWindow) {
   });
 
   ipcMain.handle('check-for-updates', async () => {
-    if (app.isPackaged) {
+    if (!app.isPackaged) {
+      return { ok: false, message: 'Auto-update only works in the installed app, not in dev mode.' };
+    }
+    try {
       const { autoUpdater } = require('electron-updater');
       await autoUpdater.checkForUpdates();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, message: err.message };
     }
-    return { ok: true };
   });
 }
 

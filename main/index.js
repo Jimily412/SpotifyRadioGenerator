@@ -73,16 +73,30 @@ app.whenReady().then(async () => {
 
   if (app.isPackaged) {
     const { autoUpdater } = require('electron-updater');
-    autoUpdater.on('update-available', () => {
-      mainWindow && mainWindow.webContents.send('update-available');
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('checking-for-update', () => {
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'checking' });
     });
-    autoUpdater.on('update-downloaded', () => {
+    autoUpdater.on('update-available', (info) => {
+      mainWindow && mainWindow.webContents.send('update-available');
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'available', version: info.version });
+    });
+    autoUpdater.on('update-not-available', () => {
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'up-to-date' });
+    });
+    autoUpdater.on('update-downloaded', (info) => {
       mainWindow && mainWindow.webContents.send('update-downloaded');
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'downloaded', version: info.version });
     });
     autoUpdater.on('error', (err) => {
       console.error('AutoUpdater error:', err);
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'error', message: err.message });
     });
-    autoUpdater.checkForUpdatesAndNotify().catch(err => console.error('Update check failed:', err));
+    autoUpdater.checkForUpdatesAndNotify().catch(err => {
+      console.error('Update check failed:', err);
+      mainWindow && mainWindow.webContents.send('update-status', { state: 'error', message: err.message });
+    });
   }
 
   app.on('activate', () => {
