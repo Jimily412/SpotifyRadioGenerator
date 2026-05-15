@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -11,8 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify Node.js
-        run: node --version && npm --version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Install dependencies
         run: npm install
