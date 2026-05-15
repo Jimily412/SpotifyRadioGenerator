@@ -19,10 +19,12 @@ function findFiles(dir, predicate, results = []) {
 }
 
 function isHistoryFile(name) {
-  // Standard export: StreamingHistory_music_0.json
-  // Extended export: endsong_0.json
+  // Standard account data export: StreamingHistory_music_0.json
+  // Extended streaming history (older): endsong_0.json
+  // Extended streaming history (newer): Streaming_History_Audio_2023-2024_8.json
   return /^StreamingHistory_music_\d+\.json$/i.test(name) ||
-         /^endsong_\d+\.json$/i.test(name);
+         /^endsong_\d+\.json$/i.test(name) ||
+         /^Streaming_History_Audio_.*\.json$/i.test(name);
 }
 
 function isLibraryFile(name) {
