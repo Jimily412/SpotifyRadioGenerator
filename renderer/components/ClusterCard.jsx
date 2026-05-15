@@ -1,41 +1,57 @@
 import React from 'react';
 
-const MOOD_COLOR = {
-  'Hype': '#ff6b35',
-  'Chill': '#74b9ff',
-  'Feel Good': '#fdcb6e',
-  'Dark / Moody': '#a29bfe',
-  'Focus / Instrumental': '#00b894',
-  'Mixed': '#636e72',
-  'Top Picks': '#1DB954',
-  'Heavy Rotation': '#00cec9',
-  'Regular Plays': '#6c5ce7',
-  'Occasional Plays': '#fd79a8',
-  'Light Plays': '#fab1a0',
-  'Discovery Seeds': '#55efc4',
-};
+const CLUSTER_COLORS = [
+  '#ff6b35', // Hype — orange
+  '#74b9ff', // Chill — blue
+  '#55efc4', // Feel Good — mint
+  '#a29bfe', // Dark / Moody — violet
+  '#fdcb6e', // Focus / Instrumental — amber
+  '#1DB954', // Mixed — green (Spotify)
+];
 
 export default function ClusterCard({ cluster }) {
-  const pct = parseFloat(cluster.weightPct) || 0;
-  const color = MOOD_COLOR[cluster.label] || '#1DB954';
+  const color = CLUSTER_COLORS[cluster.id % CLUSTER_COLORS.length];
+  const totalPct = cluster.pct != null ? Math.round(cluster.pct * 100) : null;
 
   return (
     <div className="cluster-card">
-      <div className="cluster-header">
-        <span className="cluster-label" style={{ color }}>{cluster.label}</span>
-        <span className="cluster-pct">{pct.toFixed(1)}%</span>
+      <div className="cluster-card-header">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div className="cluster-label" style={{ color }}>{cluster.label}</div>
+            <div className="cluster-meta">
+              {cluster.trackCount?.toLocaleString()} tracks
+              {totalPct != null && <> · {totalPct}% of your taste</>}
+            </div>
+          </div>
+          <div style={{
+            width: 36, height: 36, borderRadius: '50%',
+            background: `${color}22`, border: `2px solid ${color}44`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 14, flexShrink: 0,
+          }}>
+            {['🔥','🌊','✨','🌑','🎹','🎵'][cluster.id % 6]}
+          </div>
+        </div>
+        {totalPct != null && (
+          <div className="cluster-bar-wrap">
+            <div className="cluster-bar-bg">
+              <div className="cluster-bar" style={{ width: `${totalPct}%`, background: color }} />
+            </div>
+          </div>
+        )}
       </div>
-      <div className="cluster-bar-bg">
-        <div className="cluster-bar" style={{ width: `${Math.min(100, pct)}%`, background: color }} />
-      </div>
-      <div className="cluster-track-count">{cluster.trackCount} tracks</div>
-      <ul className="cluster-tracks">
-        {(cluster.topTracks || []).map((t, i) => (
-          <li key={i}>
-            {t.trackName}<span> — {t.artistName}</span>
-          </li>
-        ))}
-      </ul>
+
+      {cluster.topTracks?.length > 0 && (
+        <ul className="cluster-tracks">
+          {cluster.topTracks.slice(0, 4).map((t, i) => (
+            <li key={i}>
+              <span className="t-name">{t.name}</span>
+              <span className="t-artist">{t.artistName}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

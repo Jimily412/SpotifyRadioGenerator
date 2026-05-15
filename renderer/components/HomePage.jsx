@@ -11,14 +11,24 @@ export default function HomePage({ spotifyStatus, settings, setPage }) {
 
   return (
     <div>
-      <div className="page-header">
-        <div className="page-title">Welcome back</div>
-        <div className="page-subtitle">Your personal music taste engine — powered by your full listening history.</div>
+      <div className="home-hero">
+        <div className="home-hero-title">
+          {spotifyStatus.connected && spotifyStatus.displayName
+            ? `Hey, ${spotifyStatus.displayName.split(' ')[0]}.`
+            : 'Welcome back.'}
+        </div>
+        <div className="home-hero-sub">
+          Discovery playlists built from your complete listening history — not just what you played last week.
+        </div>
+        <div style={{ marginTop: 24, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn btn-primary" onClick={() => setPage('generate')}>Generate Playlist →</button>
+          <button className="btn btn-secondary" onClick={() => setPage('analyze')}>Analyze My Taste</button>
+        </div>
       </div>
 
       <div className="home-stats">
         <div className="stat-card">
-          <div className="section-eyebrow">Spotify</div>
+          <div className="stat-card-label">Spotify</div>
           {spotifyStatus.connected ? (
             <>
               <span className="status-chip status-connected"><span className="dot" /> Connected</span>
@@ -27,27 +37,39 @@ export default function HomePage({ spotifyStatus, settings, setPage }) {
               )}
             </>
           ) : (
-            <span className="status-chip status-disconnected"><span className="dot" /> Not connected</span>
+            <>
+              <span className="status-chip status-disconnected"><span className="dot" /> Not connected</span>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>Open Settings → Re-authorize Spotify</div>
+            </>
           )}
         </div>
 
         <div className="stat-card">
-          <div className="section-eyebrow">Last.fm</div>
+          <div className="stat-card-label">Last.fm</div>
           {lastfmUser ? (
-            <span className="status-chip status-connected"><span className="dot" /> {lastfmUser}</span>
+            <>
+              <span className="status-chip status-connected"><span className="dot" /> {lastfmUser}</span>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>Scrobble data active</div>
+            </>
           ) : (
-            <span className="status-chip status-warning"><span className="dot" /> Not configured</span>
+            <>
+              <span className="status-chip status-warning"><span className="dot" /> Not configured</span>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>Open Settings to add Last.fm for better results.</div>
+            </>
           )}
         </div>
 
         {lastPlaylist && (
           <div className="stat-card">
-            <div className="section-eyebrow">Last Playlist</div>
-            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 3, color: 'var(--text)' }}>
-              {lastPlaylist.trackCount} tracks
+            <div className="stat-card-label">Last Playlist</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: 'var(--text)', letterSpacing: '-0.5px', lineHeight: 1, marginBottom: 4 }}>
+              {lastPlaylist.trackCount}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
-              {lastPlaylist.playlistName} · {new Date(lastPlaylist.date).toLocaleDateString()}
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+              tracks · {new Date(lastPlaylist.date).toLocaleDateString()}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 600, marginBottom: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {lastPlaylist.playlistName}
             </div>
             {lastPlaylist.playlistUrl && (
               <button className="btn btn-secondary btn-sm" onClick={() => window.electronAPI.openExternal(lastPlaylist.playlistUrl)}>
@@ -58,32 +80,21 @@ export default function HomePage({ spotifyStatus, settings, setPage }) {
         )}
       </div>
 
-      {!spotifyStatus.connected && (
-        <div className="notice notice-warn">
-          Connect your Spotify account to get started. Open Settings and click "Re-authorize Spotify."
-        </div>
-      )}
-
       <div className="card">
-        <h2>How it works</h2>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
-          {[
-            ['1', 'Load your Spotify data export', 'Request your data at spotify.com/account/privacy and load it on the Analyze page.'],
-            ['2', 'Build your taste fingerprint', 'TasteEngine merges your full history, live Spotify data, and Last.fm scrobbles into weighted taste clusters.'],
-            ['3', 'Generate a discovery playlist', 'Finds artists similar to your clusters and creates a playlist of tracks you haven\'t heard yet.'],
-          ].map(([num, title, desc]) => (
-            <div key={num} style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
-              <div className="step-badge">{num}</div>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', marginBottom: 2 }}>{title}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>{desc}</div>
-              </div>
+        <h3 style={{ marginBottom: 20 }}>How it works</h3>
+        {[
+          ['Load your Spotify data export', 'Request your data at spotify.com/account/privacy. Load the .zip on the Analyze page once it arrives.'],
+          ['Build your taste fingerprint', 'TasteEngine merges your full history, live top tracks, and Last.fm scrobbles into weighted clusters.'],
+          ["Generate a discovery playlist", "Finds artists similar to your taste clusters and builds a playlist of tracks you haven't heard yet."],
+        ].map(([title, desc], i) => (
+          <div key={i} className="how-step">
+            <div className="step-num">{i + 1}</div>
+            <div>
+              <div className="step-title">{title}</div>
+              <div className="step-desc">{desc}</div>
             </div>
-          ))}
-        </div>
-        <button className="btn btn-primary" onClick={() => setPage('analyze')}>
-          Start Analyzing →
-        </button>
+          </div>
+        ))}
       </div>
     </div>
   );
