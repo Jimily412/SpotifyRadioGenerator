@@ -5,6 +5,7 @@ import HomePage from './components/HomePage';
 import AnalyzePage from './components/AnalyzePage';
 import GeneratePage from './components/GeneratePage';
 import PlaylistsPage from './components/PlaylistsPage';
+import StatsPage from './components/StatsPage';
 import GuidePage from './components/GuidePage';
 import SettingsPage from './components/SettingsPage';
 import OnboardingPage from './components/OnboardingPage';
@@ -96,6 +97,7 @@ export default function App() {
           {page === 'analyze' && <AnalyzePage />}
           {page === 'generate' && <GeneratePage />}
           {page === 'playlists' && <PlaylistsPage />}
+          {page === 'stats' && <StatsPage />}
           {page === 'guide' && <GuidePage />}
         </div>
       </div>

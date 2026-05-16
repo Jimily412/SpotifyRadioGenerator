@@ -152,6 +152,23 @@ function registerIpcHandlers(mainWindow) {
       lastFingerprintData = { fingerprint, clusters, tracksWithFeatures: audioFeaturesAvailable ? tracksWithFeatures : resolvedTracks, merged };
       store.set('fingerprint', { fingerprint, clusters: clusters.map(c => ({ ...c, tracks: undefined, topTracks: c.topTracks })) });
 
+      // Build and persist stats for the Stats page
+      const artistMap = {};
+      for (const t of merged) {
+        if (!t.artistName) continue;
+        if (!artistMap[t.artistName]) artistMap[t.artistName] = { name: t.artistName, weight: 0, trackCount: 0 };
+        artistMap[t.artistName].weight += t.weight || 1;
+        artistMap[t.artistName].trackCount++;
+      }
+      store.set('stats', {
+        topArtists: Object.values(artistMap).sort((a, b) => b.weight - a.weight).slice(0, 25),
+        topTracks: merged.slice(0, 25).map(t => ({ artistName: t.artistName, trackName: t.trackName, weight: t.weight, plays: t.plays || 0 })),
+        totalArtists: Object.keys(artistMap).length,
+        totalTracks: merged.length,
+        clusters: clusters.map(c => ({ id: c.id, label: c.label, weightPct: c.weightPct, trackCount: c.tracks.length })),
+        analyzedAt: new Date().toISOString(),
+      });
+
       logFn('Analysis complete!');
       return {
         ok: true,
@@ -286,6 +303,10 @@ function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('get-playlists', async () => {
     return getStore().get('playlists') || [];
+  });
+
+  ipcMain.handle('get-stats', async () => {
+    return getStore().get('stats') || null;
   });
 
   ipcMain.handle('get-settings', async () => {

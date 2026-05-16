@@ -36,9 +36,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Shell
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
-  // Playlist history
+  // Playlist history + stats
   getLastPlaylist: () => ipcRenderer.invoke('get-last-playlist'),
   getPlaylists: () => ipcRenderer.invoke('get-playlists'),
+  getStats: () => ipcRenderer.invoke('get-stats'),
 
   // Onboarding
   getOnboardingState: () => ipcRenderer.invoke('get-onboarding-state'),

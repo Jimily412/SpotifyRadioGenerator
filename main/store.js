@@ -28,6 +28,7 @@ function initStore() {
       onboarding: { completed: false },
       playlists: [],
       lastPlaylist: null,
+      stats: null,
       parsedData: null,
       fingerprint: null,
     },
