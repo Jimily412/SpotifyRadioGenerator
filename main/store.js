@@ -26,6 +26,7 @@ function initStore() {
         defaultPlaylistNameTemplate: 'TasteEngine Mix — {date}',
       },
       onboarding: { completed: false },
+      playlists: [],
       lastPlaylist: null,
       parsedData: null,
       fingerprint: null,

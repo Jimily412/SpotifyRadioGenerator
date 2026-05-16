@@ -12,6 +12,7 @@ const { harvestRecommendations, buildFinalPlaylist } = require('./recommender');
 
 let mainWindow_ = null;
 let lastFingerprintData = null;
+let lastBuiltPlaylist = null;
 
 function log(mainWindow, msg) {
   const ts = new Date().toLocaleTimeString();
@@ -178,7 +179,7 @@ function registerIpcHandlers(mainWindow) {
     }
   });
 
-  ipcMain.handle('generate-playlist', async (_, opts) => {
+  ipcMain.handle('build-playlist', async (_, opts) => {
     const logFn = (msg) => log(mainWindow, msg);
     const budget = new SessionBudget();
 
@@ -187,13 +188,11 @@ function registerIpcHandlers(mainWindow) {
         return { ok: false, error: 'Please run Analyze first' };
       }
 
-      const { clusters, tracksWithFeatures, merged } = lastFingerprintData;
+      const { clusters, tracksWithFeatures } = lastFingerprintData;
       const targetSize = opts.targetSize || 150;
-      const playlistName = opts.playlistName || `TasteEngine Mix — ${new Date().toLocaleDateString()}`;
       const includeFamiliar = opts.includeFamiliar || false;
       const moodBias = opts.moodBias || {};
 
-      // Apply mood bias to quotas
       let quotas = computeQuotas(clusters, targetSize);
       if (Object.keys(moodBias).length > 0) {
         let totalBias = 0;
@@ -206,21 +205,17 @@ function registerIpcHandlers(mainWindow) {
 
       logFn(`Target playlist size: ${targetSize} tracks, ${clusters.length} clusters`);
 
-      // Build liked/played exclusion sets
       logFn('Building exclusion sets...');
       let likedIds = new Set();
       let highPlayIds = new Set();
-
       if (!includeFamiliar) {
         const liked = await getLikedTracks(budget, logFn);
         for (const t of liked) if (t.spotifyId) likedIds.add(t.spotifyId);
-
         for (const t of (tracksWithFeatures || [])) {
           if (t.plays > 15 && t.spotifyId) highPlayIds.add(t.spotifyId);
         }
       }
 
-      // Augment cluster tracks with spotifyId from tracksWithFeatures
       const idLookup = Object.fromEntries(
         tracksWithFeatures.map(t => [`${t.artistName.toLowerCase().trim()}|${t.trackName.toLowerCase().trim()}`, t])
       );
@@ -235,32 +230,62 @@ function registerIpcHandlers(mainWindow) {
 
       const harvestResults = await harvestRecommendations(clusters, quotas, likedIds, highPlayIds, budget, logFn);
 
-      logFn(`Filtering and scoring candidates...`);
+      logFn('Filtering and scoring candidates...');
       const { tracks, clusterBreakdown, newArtists } = buildFinalPlaylist(harvestResults, targetSize);
 
-      logFn(`Creating playlist "${playlistName}" in Spotify...`);
-      const trackIds = tracks.map(t => t.id);
-      const playlistInfo = await createPlaylist(playlistName, trackIds, budget, logFn);
+      lastBuiltPlaylist = { tracks, clusterBreakdown, newArtists };
 
-      const result = {
+      logFn(`Built ${tracks.length} tracks — review and add to Spotify when ready.`);
+      return {
         ok: true,
-        playlistName,
-        trackCount: tracks.length,
-        playlistUrl: playlistInfo.url,
-        playlistUri: playlistInfo.uri,
+        tracks: tracks.map(t => ({
+          id: t.id,
+          name: t.name,
+          artist: Array.isArray(t.artists) ? t.artists[0] || '' : '',
+          clusterIdx: t.clusterIdx ?? 0,
+        })),
         clusterBreakdown,
         newArtists,
-        budgetUsed: budget.summary(),
       };
-
-      getStore().set('lastPlaylist', { ...result, date: new Date().toISOString() });
-      logFn(`Done! ${tracks.length} tracks added to "${playlistName}".`);
-
-      return result;
     } catch (err) {
-      logFn(`Generation error: ${err.message}`);
+      logFn(`Build error: ${err.message}`);
       return { ok: false, error: err.message };
     }
+  });
+
+  ipcMain.handle('push-playlist', async (_, { playlistName, trackIds }) => {
+    const logFn = (msg) => log(mainWindow, msg);
+    const budget = new SessionBudget();
+    try {
+      const name = playlistName || `TasteEngine Mix — ${new Date().toLocaleDateString()}`;
+      logFn(`Creating "${name}" in Spotify (${trackIds.length} tracks)...`);
+      const playlistInfo = await createPlaylist(name, trackIds, budget, logFn);
+
+      const entry = {
+        playlistName: name,
+        trackCount: trackIds.length,
+        playlistUrl: playlistInfo.url,
+        playlistUri: playlistInfo.uri,
+        date: new Date().toISOString(),
+      };
+
+      const store = getStore();
+      const history = store.get('playlists') || [];
+      history.unshift(entry);
+      if (history.length > 50) history.length = 50;
+      store.set('playlists', history);
+      store.set('lastPlaylist', entry);
+
+      logFn(`Done! "${name}" added to Spotify.`);
+      return { ok: true, ...entry };
+    } catch (err) {
+      logFn(`Push error: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('get-playlists', async () => {
+    return getStore().get('playlists') || [];
   });
 
   ipcMain.handle('get-settings', async () => {

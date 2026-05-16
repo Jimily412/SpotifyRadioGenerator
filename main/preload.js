@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   analyzeFingerprint: () => ipcRenderer.invoke('analyze-fingerprint'),
 
   // Generation
-  generatePlaylist: (opts) => ipcRenderer.invoke('generate-playlist', opts),
+  buildPlaylist: (opts) => ipcRenderer.invoke('build-playlist', opts),
+  pushPlaylist: (opts) => ipcRenderer.invoke('push-playlist', opts),
   onProgressLog: (cb) => ipcRenderer.on('progress-log', (_, msg) => cb(msg)),
   removeProgressLog: () => ipcRenderer.removeAllListeners('progress-log'),
 
@@ -35,8 +36,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Shell
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
 
-  // Last run info
+  // Playlist history
   getLastPlaylist: () => ipcRenderer.invoke('get-last-playlist'),
+  getPlaylists: () => ipcRenderer.invoke('get-playlists'),
 
   // Onboarding
   getOnboardingState: () => ipcRenderer.invoke('get-onboarding-state'),
