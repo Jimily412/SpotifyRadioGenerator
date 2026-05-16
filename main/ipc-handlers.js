@@ -274,7 +274,14 @@ function registerIpcHandlers(mainWindow) {
 
   ipcMain.handle('save-settings', async (_, newSettings) => {
     const store = getStore();
-    if (newSettings.credentials) store.set('credentials', newSettings.credentials);
+    if (newSettings.credentials) {
+      const current = store.get('credentials') || {};
+      const merged = { ...current };
+      for (const [key, val] of Object.entries(newSettings.credentials)) {
+        merged[key] = { ...(current[key] || {}), ...val };
+      }
+      store.set('credentials', merged);
+    }
     if (newSettings.settings) store.set('settings', newSettings.settings);
     return { ok: true };
   });
